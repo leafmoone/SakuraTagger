@@ -69,3 +69,44 @@ tensors that newly added heads can consume with normal autograd. The complete
 original state, including auxiliary temperature and bias tensors, remains in the
 wrapper's `state_dict()` and supports strict reload. Tiny Synthetic models use
 smaller dimensions derived from their own configuration.
+
+## Native resolution buckets
+
+```python
+from PIL import Image
+from sakura_tagger.data import BucketConfig, BucketSelector, NativePreprocessor
+selector = BucketSelector(BucketConfig(target_pixels=512*512, max_pixels=278528,
+                                      max_side=2048, max_error=0.02))
+preprocess = NativePreprocessor(selector)
+prepared = preprocess(Image.open("image.png"))
+features = backbone(prepared.tensor.unsqueeze(0))
+print(prepared.bucket)  # Original/target W,H, aspect error, patches, budget deviation
+```
+
+Use this same preprocessor for training and inference. It applies EXIF orientation,
+composites existing transparent pixels onto white (configurable), converts to RGB,
+resizes the **complete** image canvas, and applies ImageNet normalization. It does
+not crop or add padding. Both dimensions are multiples of 16. Finite aligned
+buckets introduce a reported small aspect-ratio deviation; the error is symmetric
+under width/height exchange, `max(target_ratio/original_ratio,
+original_ratio/target_ratio)-1`.
+
+The selector searches all legal aligned buckets within the side/pixel limits.
+It first considers candidates within 1% aspect error, then up to the configured
+2% limit if necessary, and within that band chooses area closest to the target.
+The default maximum allows a small pixel-budget fluctuation; set `max_pixels` to
+`target_pixels` for a strict upper bound. Unrepresentable ratios raise an error
+with the best available deviation instead of silently cropping or padding.
+These dynamically generated buckets are provisional, not a final dataset-derived
+bucket list.
+
+`BucketBatchSampler(sizes, batch_size, selector=selector)` groups indices into
+same-size batches. Supply `(width,height)` sizes **after EXIF correction** and use
+the same selector in preprocessing. Optional `shuffle=True`, `seed`, and
+`set_epoch()` give reproducible ordering; `drop_last=True` drops the final short
+batch of each bucket, otherwise every index appears once.
+
+Preserving legacy weight computations does not establish unchanged accuracy:
+Kaloscope's original 512-square center-crop preprocessing differs from these
+full-frame dynamic inputs. Real-data evaluation and threshold calibration are
+still needed; no accuracy equivalence is claimed.

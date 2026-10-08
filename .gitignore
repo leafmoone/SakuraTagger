@@ -10,7 +10,7 @@ dist/
 checkpoints/
 cache/
 .cache/
-data/
+/data/
 outputs/
 *.safetensors
 *.pt
