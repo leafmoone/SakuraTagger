@@ -1,0 +1,16 @@
+# Placeholder class counts and thresholds, not a calibrated tag vocabulary.
+attention:
+  hidden_dim: 256
+  num_heads: 4
+heads:
+  - {group_name: composition, group_type: multilabel, num_classes: 5, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
+  - {group_name: environment, group_type: multilabel, num_classes: 6, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
+  - {group_name: visual_medium, group_type: multilabel, num_classes: 4, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
+  - {group_name: class, group_type: multiclass, num_classes: 3, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true}
+  - {group_name: completeness, group_type: multiclass, num_classes: 3, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true}
+  - {group_name: corruption, group_type: binary, num_classes: 1, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true}
+  - {group_name: appearance, group_type: multilabel, num_classes: 7, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
+  - {group_name: expression, group_type: multilabel, num_classes: 4, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
+  - {group_name: clothing, group_type: multilabel, num_classes: 6, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
+  - {group_name: pose_action, group_type: multilabel, num_classes: 5, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
+  - {group_name: objects, group_type: multilabel, num_classes: 8, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}

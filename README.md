@@ -110,3 +110,55 @@ Preserving legacy weight computations does not establish unchanged accuracy:
 Kaloscope's original 512-square center-crop preprocessing differs from these
 full-frame dynamic inputs. Real-data evaluation and threshold calibration are
 still needed; no accuracy equivalence is claimed.
+
+## Configurable global/local task heads
+
+```python
+from sakura_tagger.model import MultiTaskModel, read_head_config
+from sakura_tagger.training import multitask_loss
+specs, attention = read_head_config("configs/v1_dev.yaml")
+tagging_model = MultiTaskModel(backbone, specs, **attention)
+tagging_model.train()
+output = tagging_model(images)  # output.logits contains raw new-task logits
+losses = multitask_loss(output.logits, targets, specs, masks)
+losses.total.backward()
+# Only train parameters where requires_grad is True.
+prediction = tagging_model.predict(images, head_selection=["artist", "appearance", "class"])
+```
+
+Each registry entry declares `group_name`, `group_type`, `num_classes`,
+`feature_mode`, `query_count`, `loss_weight`, `enabled`, and an optional threshold.
+The example provides six global and five local tasks with **placeholder** class
+counts. Disabled heads are not constructed or executed. Multi-label/binary heads
+use sigmoid only during prediction; mutually exclusive groups use softmax.
+Training always consumes raw logits.
+
+Local groups have independent learned queries (four by default), a shared
+256-dimensional key/value projection, and four attention heads. All active group
+queries share a single native PyTorch SDPA call and one key/value projection over
+the same patch sequence. Their pooled features are concatenated with global
+features before group-specific classification. The original DINOv3 runs once per
+input batch, regardless of the requested task count.
+
+Targets and masks are dictionaries keyed by group name. Multi-label and binary
+targets/masks have shape `[B,C]` (`C=1` for binary), and mutually exclusive targets/
+masks have shape `[B]`. Masks are true for known supervision. Unknown entries are
+selected out before evaluating losses, so masked NaNs or sentinel class IDs are
+safe. Each loss is normalized by its valid element/sample count, then multiplied
+by its configured weight. All-empty tasks return differentiable zero; absent
+target groups are skipped. Artist classification is excluded from new-task loss.
+
+`predict` returns requested legacy `artist` probabilities and `style_embedding`,
+`general_tags_by_group` entries containing `probabilities`, boolean `selected`,
+and `threshold`, plus probability tensors for requested single-label groups
+(`class`, `completeness`, and `corruption` in the example). An omitted selection
+requests all enabled heads. Thresholds are placeholders, not calibrated values.
+Save/load `tagging_model.state_dict()` with the same registry architecture for a
+complete strict roundtrip. `tagging_model.backbone.legacy.state_dict()` preserves
+and reloads the original model independently of the new heads.
+
+Future data integration needs per-group ordered label mappings consistent with
+class counts, image sizes after EXIF orientation, label tensors and supervision
+masks, train/validation splits, and validation-based threshold calibration. These
+are interfaces for future work; this implementation neither downloads a training
+dataset nor runs production training or P4.
