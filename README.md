@@ -50,3 +50,22 @@ checkpoint, accuracy benchmark, or substitute for real weight verification.
 
 See [upstream sources and license boundaries](docs/UPSTREAM.md) before use or
 redistribution. This project does not grant a blanket MIT or Apache license.
+
+## Shared frozen features
+
+```python
+from sakura_tagger.model import KaloscopeBackbone
+backbone = KaloscopeBackbone(model)
+features = backbone.forward_features(images)
+# features.global_features: [B, 1536]
+# features.cls_tokens: [B, 768]; patch_tokens: [B, (H/16)*(W/16), 768]
+# features.artist_logits: [B, 44129]; style_embedding: [B, 256]
+```
+
+Every feature bundle shares exactly one DINOv3 forward. The original backbone,
+artist head, and style projector remain frozen and in evaluation mode even when
+a containing training model calls `train()`. Features are ordinary detached
+tensors that newly added heads can consume with normal autograd. The complete
+original state, including auxiliary temperature and bias tensors, remains in the
+wrapper's `state_dict()` and supports strict reload. Tiny Synthetic models use
+smaller dimensions derived from their own configuration.
