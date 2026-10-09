@@ -208,11 +208,187 @@ def check_data():
             'manifest_and_vocabulary_rejections': rejected, 'unknown_supervision': 'PASS'}
 
 
+def check_losses():
+    from .training import (LossConfig, masked_asymmetric_loss, masked_single_label_loss,
+                           multitask_loss, trusted_single_artist)
+    torch.manual_seed(29)
+    source = torch.randn(3, 17)
+    targets = torch.randint(0, 2, (3, 17)).float()
+    mask = torch.rand(3, 17) > 0.2
+    targets[~mask] = float('nan')
+    gradients, values = [], []
+    for chunk_size in (4, 100):
+        logits = source.clone().requires_grad_()
+        value, count = masked_asymmetric_loss(logits, targets, mask, config=LossConfig(chunk_size=chunk_size))
+        value.backward()
+        gradients.append(logits.grad.clone())
+        values.append(value)
+    torch.testing.assert_close(values[0], values[1])
+    torch.testing.assert_close(gradients[0], gradients[1])
+    assert not gradients[0][~mask].any()
+    extreme = torch.tensor([[-1000, 1000, -80, 80]], dtype=torch.bfloat16, requires_grad=True)
+    value, _ = masked_asymmetric_loss(extreme, torch.tensor([[1., 0., 0., 1.]]), torch.ones(1, 4, dtype=torch.bool))
+    value.backward()
+    assert torch.isfinite(value) and torch.isfinite(extreme.grad).all()
+    empty = torch.full((2, 5), float('nan'), requires_grad=True)
+    zero, empty_count = masked_asymmetric_loss(empty, empty.detach(), torch.zeros(2, 5, dtype=torch.bool))
+    zero.backward()
+    assert zero == 0 and empty_count == 0 and not empty.grad.any()
+    logits = source.clone().requires_grad_()
+    labels, sample_mask = torch.tensor([2, -999, 10]), torch.tensor([True, False, True])
+    ce, count = masked_single_label_loss(logits, labels, sample_mask, chunk_size=4)
+    reference = torch.nn.functional.cross_entropy(logits[sample_mask], labels[sample_mask])
+    torch.testing.assert_close(ce, reference)
+    torch.testing.assert_close(torch.autograd.grad(ce, logits, retain_graph=True)[0], torch.autograd.grad(reference, logits)[0])
+    _, trusted = trusted_single_artist(torch.tensor([[0., 1.], [0., 1.], [1., 1.]]),
+                                      torch.tensor([[True, True], [False, True], [True, True]]))
+    assert trusted.tolist() == [True, False, False]
+    try:
+        multitask_loss({'general': source}, {'general': targets})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Missing masks were silently accepted')
+    return {'chunked_value_and_gradient_parity': 'PASS', 'BF16_extreme_finite': 'PASS',
+            'empty_and_unknown_masks': 'PASS', 'trusted_single_artist_CE': 'PASS'}
+
+
+def check_training():
+    from PIL import Image
+    from torch.utils.data import DataLoader
+    from .data import BucketConfig, BucketSelector, BucketBatchSampler, ManifestDataset, NativePreprocessor
+    from .data.contract import SCHEMA_VERSION, encode_supervision, manifest_fingerprint
+    from .training import Trainer, TrainerConfig, LossConfig, checkpoint_metadata
+    vocabulary, records = synthetic_vocabulary(), synthetic_records()
+    bucket_config = BucketConfig(target_pixels=1536, max_pixels=2048, max_side=64)
+    dataset_metadata = {'schema_version': SCHEMA_VERSION, 'dataset_id': 'synthetic', 'provider': 'SakuraPool',
+                        'vocab_sha256': vocabulary.sha256, 'manifest_sha256': manifest_fingerprint(records)}
+    layout = vocabulary.layout(feature_dim=32, attention_dim=16)
+    def make_model(seed=0):
+        return MultiTaskModel(KaloscopeBackbone(synthetic_fixture(seed)), layout)
+    model = make_model()
+    metadata = checkpoint_metadata(model, vocabulary, dataset_metadata, bucket_config, 'synthetic-original-v1')
+    config = TrainerConfig(accumulation_steps=2, gradient_clip=1.0)
+    losses = LossConfig(chunk_size=4, general_groups={'sample_group': [0, 1]})
+    trainer = Trainer(model, metadata, config=config, loss_config=losses)
+    encoded = [encode_supervision(record, vocabulary) for record in records[:2]]
+    batch = {'images': torch.randn(2, 3, 32, 48),
+             'targets': {name: torch.stack([pair[0][name] for pair in encoded]) for name in encoded[0][0]},
+             'masks': {name: torch.stack([pair[1][name] for pair in encoded]) for name in encoded[0][1]}}
+    sampler = BucketBatchSampler([(32, 48)] * 8, 2, shuffle=True, seed=41)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'roundtrip.pt'
+        trainer.train_batch(batch, sampler=sampler)
+        try:
+            trainer.save_checkpoint(path, sampler=sampler)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Partial accumulation checkpoint was accepted')
+        trainer.train_batch(batch, sampler=sampler)
+        trainer.save_checkpoint(path, sampler=sampler)
+        expected_rng = torch.rand(3)
+        expected_python, expected_numpy = random.random(), __import__('numpy').random.rand()
+        restored = Trainer(make_model(9), metadata, config=config, loss_config=losses)
+        resumed_sampler = BucketBatchSampler([(32, 48)] * 8, 2, shuffle=True, seed=41)
+        restored.load_checkpoint(path, sampler=resumed_sampler)
+        torch.testing.assert_close(torch.rand(3), expected_rng, rtol=0, atol=0)
+        assert random.random() == expected_python and __import__('numpy').random.rand() == expected_numpy
+        assert list(resumed_sampler) == list(sampler)
+        assert restored.global_step == 1 and restored.micro_step == 2
+        for key, value in model.state_dict().items():
+            torch.testing.assert_close(value, restored.model.state_dict()[key], rtol=0, atol=0)
+        # Same next update proves optimizer moments and the accumulation state restored.
+        for _ in range(2):
+            trainer.train_batch(batch, sampler=sampler)
+            restored.train_batch(batch, sampler=resumed_sampler)
+        for key, value in model.state_dict().items():
+            torch.testing.assert_close(value, restored.model.state_dict()[key], rtol=0, atol=0)
+        corrupted_metadata = {**metadata, 'vocab_sha256': 'wrong'}
+        rejected = Trainer(make_model(), corrupted_metadata, config=config, loss_config=losses)
+        before = {key: value.clone() for key, value in rejected.model.state_dict().items()}
+        try:
+            rejected.load_checkpoint(path, sampler=BucketBatchSampler([(32, 48)] * 8, 2, shuffle=True, seed=41))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Mismatched checkpoint metadata was accepted')
+        assert all(torch.equal(value, rejected.model.state_dict()[key]) for key, value in before.items())
+        # Real manifest/image read, native preprocessing and default tensor collation.
+        image_record = {**records[0], 'image_path': 'image.png'}
+        Image.new('RGB', (32, 32), 'red').save(Path(directory) / 'image.png')
+        (Path(directory) / 'vocab.json').write_text(json.dumps(vocabulary.document))
+        (Path(directory) / 'manifest.jsonl').write_text(json.dumps(image_record) + '\n')
+        image_metadata = {key: value for key, value in dataset_metadata.items() if key != 'manifest_sha256'}
+        (Path(directory) / 'metadata.json').write_text(json.dumps(image_metadata))
+        dataset = ManifestDataset(Path(directory) / 'manifest.jsonl', Path(directory) / 'metadata.json',
+                                  Path(directory) / 'vocab.json', preprocessor=NativePreprocessor(BucketSelector(bucket_config)))
+        loaded = next(iter(DataLoader(dataset, batch_size=1)))
+        assert loaded['images'].shape[0:2] == (1, 3) and loaded['masks']['other_artist'].sum() == 0
+    evaluation = trainer.evaluate([batch])
+    assert set(evaluation) == {'general', 'character', 'copyright', 'other_artist'}
+    assert evaluation['character']['valid_count'] == 2 and evaluation['copyright']['valid_count'] == 4
+    trainer.set_stage('finetune_last4')
+    optimized = {id(parameter) for group in trainer.optimizer.param_groups for parameter in group['params']}
+    assert optimized == {id(parameter) for parameter in trainer.model.parameters() if parameter.requires_grad}
+    # Opt-in independent original teacher; zero labels isolate student KD gradients.
+    student = make_model(10).set_stage('finetune_last4')
+    teacher = KaloscopeBackbone(synthetic_fixture())
+    teacher_before = {key: value.clone() for key, value in teacher.state_dict().items()}
+    teacher_config = TrainerConfig(stage='finetune_last4', accumulation_steps=2,
+                                  preservation={'global_features': 1.0, 'style_embedding': 1.0, 'artist_logits': 1.0})
+    kd_metadata = checkpoint_metadata(student, vocabulary, dataset_metadata, bucket_config, 'synthetic-original-v1')
+    kd_trainer = Trainer(student, kd_metadata, config=teacher_config, loss_config=losses, teacher=teacher)
+    unsupervised = {**batch, 'masks': {name: torch.zeros_like(mask) for name, mask in batch['masks'].items()}}
+    kd_result = kd_trainer.train_batch(unsupervised)
+    assert all(parameter.grad is None and not parameter.requires_grad for parameter in teacher.parameters())
+    assert all(torch.equal(value, teacher.state_dict()[key]) for key, value in teacher_before.items())
+    assert student.backbone.legacy.backbone.blocks[-1].attn.qkv.weight.grad.abs().sum() > 0
+    kd_trainer.flush()
+    # BF16 configurable CPU AMP integration, no CUDA invocation.
+    amp_model = make_model()
+    amp_trainer = Trainer(amp_model, metadata, config=TrainerConfig(amp='bf16'), loss_config=losses)
+    amp_result = amp_trainer.train_batch(batch)
+    assert __import__('math').isfinite(amp_result['loss'])
+    return {'checkpoint_exact_next_update': 'PASS', 'checkpoint_RNG_and_sampler': 'PASS',
+            'checkpoint_rejects_partial_or_mismatch': 'PASS', 'manifest_image_and_collation': 'PASS',
+            'evaluation_domain_counts': {name: value['valid_count'] for name, value in evaluation.items()},
+            'stage_optimizer_refresh': 'PASS', 'teacher_frozen_student_KD_gradient': 'PASS',
+            'KD_losses': kd_result['auxiliary'], 'CPU_BF16_AMP': 'PASS'}
+
+
+def production_head_counts():
+    from .model.modules import GeneralModule, IdentityModule, OtherArtistModule
+    layout = HeadLayout(37679, 50369, 17664, 21506)
+    with torch.device('meta'):
+        modules = {'general': GeneralModule(1536, 768, layout), 'identity': IdentityModule(1536, layout),
+                   'other_artist': OtherArtistModule(1536, layout.other_artist)}
+    counts = {name: sum(parameter.numel() for parameter in module.parameters()) for name, module in modules.items()}
+    return {**counts, 'total': sum(counts.values()), 'basis': 'candidate architecture only; final vocabulary authoritative'}
+
+
+def check_real_weights(path):
+    from .adapter import load_kaloscope
+    model = load_kaloscope(path, device='cpu')
+    wrapper = KaloscopeBackbone(model)
+    images = torch.zeros(1, 3, 32, 48)
+    with torch.no_grad():
+        style, artist = model(images, return_both=True)
+        features = wrapper(images)
+    torch.testing.assert_close(features.style_embedding, style)
+    torch.testing.assert_close(features.artist_logits, artist)
+    return {'status': 'PASS', 'artist_classes': artist.shape[-1], 'style_dimension': style.shape[-1],
+            'note': 'CPU strict load/output parity only; accuracy and GPU performance unverified'}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
+    parser.add_argument('--real-model-dir', default=None, help='Optional existing official Kaloscope package directory; never downloads')
+    args = parser.parse_args()
     torch.set_num_threads(1)
-    print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'real_weights': 'NOT_VERIFIED',
+    print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'losses': check_losses(),
+                      'training': check_training(), 'candidate_production_heads': production_head_counts(),
+                      'real_weights': check_real_weights(args.real_model_dir) if args.real_model_dir else 'NOT_VERIFIED',
                       'CUDA': 'NOT_RUN', 'formal_training': 'NOT_RUN'}, indent=2))
 
 

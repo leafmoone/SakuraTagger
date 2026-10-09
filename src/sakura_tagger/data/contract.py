@@ -160,6 +160,15 @@ def read_manifest(path, metadata, vocabulary):
     return records
 
 
+def manifest_fingerprint(records):
+    """One metadata-only pass binds record contents and order, never image bytes."""
+    digest = hashlib.sha256()
+    for record in records:
+        digest.update(json.dumps(record, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode())
+        digest.update(b'\n')
+    return digest.hexdigest()
+
+
 class ManifestDataset(Dataset):
     """Read existing images only; never crawl, download, or reorder labels."""
     def __init__(self, manifest_path, metadata_path, vocabulary_path, *, root=None,
@@ -167,6 +176,10 @@ class ManifestDataset(Dataset):
         self.vocabulary = Vocabulary.read(vocabulary_path)
         self.metadata = json.loads(Path(metadata_path).read_text(encoding='utf-8'))
         records = read_manifest(manifest_path, self.metadata, self.vocabulary)
+        fingerprint = manifest_fingerprint(records)
+        if 'manifest_sha256' in self.metadata and self.metadata['manifest_sha256'] != fingerprint:
+            raise ValueError('Dataset manifest SHA mismatch')
+        self.metadata = {**self.metadata, 'manifest_sha256': fingerprint}
         if split not in ('train', 'val', 'test'):
             raise ValueError('Invalid dataset split')
         self.records = [record for record in records if record['split'] == split]

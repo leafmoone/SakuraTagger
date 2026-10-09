@@ -1,13 +1,14 @@
-# SakuraTagger
+# SakuraTagger V1
 
-A standalone PyTorch integration of Kaloscope's frozen DINOv3 artist classifier
-and style projector. ComfyUI, torchvision, a GPU, and a training dataset are not
-required. The upstream source remains an unmodified, pinned Git submodule.
+Three new classification modules on one strictly loaded Kaloscope/DINOv3
+backbone. The original 44,129-class Artist head and 256D Style projector remain
+registered and frozen. The pinned upstream submodule is unmodified; no ComfyUI,
+torchvision, GPU or formal training dataset is needed for CPU engineering checks.
 
-## Install from this checkout
+## Install
 
-Python 3.11 or newer is required. Install a CPU build of PyTorch first when no
-GPU is available:
+Python 3.11+ and an editable checkout are required because the adapter loads the
+pinned upstream beside `src/`. A standalone wheel omits that submodule.
 
 ```sh
 git submodule update --init --recursive
@@ -15,150 +16,142 @@ python -m venv .venv
 . .venv/bin/activate
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -e .
+python -m sakura_tagger.selfcheck
 ```
 
-The editable checkout is required because the adapter reads the pinned source
-submodule beside `src/`; a standalone wheel does not contain third-party code.
+Selfcheck uses a tiny, random **12-block upstream DINOv3** with small class counts.
+It performs synthetic CPU forwards/backwards and optimizer/checkpoint checks,
+never formal model training. It reports real weights as `NOT_VERIFIED` unless an
+existing official package is explicitly supplied:
 
-## Official model package
+```sh
+python -m sakura_tagger.selfcheck --real-model-dir checkpoints/v1-artist-classifier
+```
+
+Missing real weights are never replaced with random weights. The optional real
+check verifies strict CPU loading and output parity, not real-data accuracy or
+GPU performance. Generated checkpoints, data, temporary tests and logs are Git
+ignored. The durable acceptance entry above is part of the supported program.
+
+## Original Kaloscope compatibility
 
 Place `model.safetensors`, `config.json`, and `class_mapping.csv` from the
-[v1-artist-classifier package](https://huggingface.co/heathcliff01/Kaloscope3.0-preview/tree/main/v1-artist-classifier)
-in `checkpoints/v1-artist-classifier/`, or provide your own directory argument.
-Weights and generated data are ignored by Git. Missing files, unexpected or
-missing tensor keys, key collisions, and mismatched class mappings are errors;
-there is no random-weight fallback.
+[official v1 package](https://huggingface.co/heathcliff01/Kaloscope3.0-preview/tree/main/v1-artist-classifier)
+in a directory you choose. Files and all tensor keys are strictly validated,
+including auxiliary temperature/bias tensors and the original normalization
+protocol. No weights are downloaded automatically.
 
 ```python
 from sakura_tagger import load_kaloscope
-model = load_kaloscope("checkpoints/v1-artist-classifier")  # CPU by default
-# images: float [B, 3, H, W], H/W divisible by 16, normalized using
-# mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225).
-style, artist_logits = model(images, return_both=True)
+from sakura_tagger.model import KaloscopeBackbone
+legacy = load_kaloscope("checkpoints/v1-artist-classifier")
+backbone = KaloscopeBackbone(legacy)
+features = backbone(images)  # RGB/ImageNet-normalized float [B,3,H,W]
 ```
 
-Tensor inputs must already be RGB and ImageNet-normalized. No crop, padding,
-or forced square resizing is performed. Full-image preprocessing is described
-separately as the native bucket API becomes available. Official outputs are
-256-dimensional style vectors and 44,129 artist logits, based on 1,536-dimensional
-CLS-plus-mean features. Artist input uses the original `l2_sqrt_dim` normalization;
-the style projector receives the original pooled features.
+Image H/W must be divisible by 16. Features are CLS+patch mean `[B,1536]`, CLS
+`[B,768]`, native-grid patch tokens `[B,N,768]`, optional raw original Artist
+logits `[B,44129]` and Style `[B,256]`. A feature bundle invokes DINOv3 once.
+Direct backbone calls include the legacy outputs by default; callers can pass
+`include_artist=False, include_style=False`. The original Artist path is FP32 L2
+normalization followed by multiplication by `sqrt(1536)` and its frozen linear
+head. Style receives the original unnormalized pooled features. Synthetic
+fixtures derive their smaller dimensions from their own architecture.
 
-The development-only **Synthetic** fixture uses a small randomly initialized
-upstream DINOv3. It is kept in local, Git-ignored tests and is not an official
-checkpoint, accuracy benchmark, or substitute for real weight verification.
+The complete original state remains registered and independently strict-loadable.
+T2-modified backbone states belong to new training checkpoints; do not overwrite
+the original package. Original Artist/Style parameters never directly update,
+although their predictions can change when T2 changes their input features.
 
-See [upstream sources and license boundaries](docs/UPSTREAM.md) before use or
-redistribution. This project does not grant a blanket MIT or Apache license.
+## Three physical modules
 
-## Shared frozen features
+- General: 16 learned queries, 256D attention with four heads; query concatenation
+  is learned down to 512D, added to a global residual, then classified. No second
+  General contrastive projection or 4096D-to-vocabulary classifier is created.
+- Identity: shared 1536→512 adapter and 512→(Character+Copyright) classifier.
+  Domain-local outputs retain separate IDs, masks, losses and metrics. Both are
+  multi-label; equal names across domains are distinct labels.
+- Other Artist: direct 1536D normalized input to its own linear classifier. It
+  does not consume original Artist logits or Style vectors.
+
+Candidate counts are 37,679 General, 50,369 Character + 17,664 Copyright, and
+21,506 Other Artist. Final sizes come from the versioned vocabulary. The
+candidate new heads have 91,355,378 trainable parameters; selfcheck reports each
+module and actual synthetic frozen/trainable counts separately.
 
 ```python
-from sakura_tagger.model import KaloscopeBackbone
-backbone = KaloscopeBackbone(model)
-features = backbone.forward_features(images)
-# features.global_features: [B, 1536]
-# features.cls_tokens: [B, 768]; patch_tokens: [B, (H/16)*(W/16), 768]
-# features.artist_logits: [B, 44129]; style_embedding: [B, 256]
+from sakura_tagger.data import Vocabulary
+from sakura_tagger.model import MultiTaskModel
+vocabulary = Vocabulary.read("data/vocabulary.json")
+model = MultiTaskModel(backbone, vocabulary.layout())
+output = model(images, head_selection=["general", "character", "copyright"])
+# output.logits contains raw requested classification outputs.
+model.eval()
+prediction = model.predict(images, ["general", "other_artist"], top_k=20)
+# Each classification result: {"class_ids": [B,K], "scores": [B,K]}.
 ```
 
-Every feature bundle shares exactly one DINOv3 forward. The original backbone,
-artist head, and style projector remain frozen and in evaluation mode even when
-a containing training model calls `train()`. Features are ordinary detached
-tensors that newly added heads can consume with normal autograd. The complete
-original state, including auxiliary temperature and bias tensors, remains in the
-wrapper's `state_dict()` and supports strict reload. Tiny Synthetic models use
-smaller dimensions derived from their own configuration.
+Selectable names are `general`, `character`, `copyright`, `other_artist`,
+`artist`, `style_embedding`. Omitted selection requests all. General attention,
+Identity and unrelated legacy branches are physically skipped when unselected;
+requesting either identity domain executes the shared Identity module once.
+Prediction defaults to Top-K, not full dense probabilities; `dense=True` is an
+explicit opt-in. Original Artist retains its original softmax semantics, and all
+four new domains use independent sigmoids. Uncalibrated original/other Artist
+scores are never combined into one ranking. Call `eval()` before inference.
+`configs/v1_dev.yaml` is a formal candidate architecture/training configuration;
+old per-semantic-group neural heads have been removed.
 
-## Native resolution buckets
+## Native full-frame buckets
 
 ```python
 from PIL import Image
-from sakura_tagger.data import BucketConfig, BucketSelector, NativePreprocessor
-selector = BucketSelector(BucketConfig(target_pixels=512*512, max_pixels=278528,
-                                      max_side=2048, max_error=0.02))
-preprocess = NativePreprocessor(selector)
-prepared = preprocess(Image.open("image.png"))
-features = backbone(prepared.tensor.unsqueeze(0))
-print(prepared.bucket)  # Original/target W,H, aspect error, patches, budget deviation
+from sakura_tagger.data import BucketSelector, NativePreprocessor
+selector = BucketSelector()
+prepared = NativePreprocessor(selector)(Image.open("image.png"))
+prediction = model.predict(prepared.tensor.unsqueeze(0), ["general"])
+print(prepared.bucket)
 ```
 
-Use this same preprocessor for training and inference. It applies EXIF orientation,
-composites existing transparent pixels onto white (configurable), converts to RGB,
-resizes the **complete** image canvas, and applies ImageNet normalization. It does
-not crop or add padding. Both dimensions are multiples of 16. Finite aligned
-buckets introduce a reported small aspect-ratio deviation; the error is symmetric
-under width/height exchange, `max(target_ratio/original_ratio,
-original_ratio/target_ratio)-1`.
+The shared preprocessor applies EXIF orientation, composites existing alpha onto
+white (configurable), converts to RGB and resizes the complete canvas. It never
+crops or pads. Native buckets use aligned 16px dimensions near 512² pixels, with
+reported symmetric ratio error. The preferred error band is 1%, maximum 2% by
+default; closest area wins within the first usable band. Impossible ratios raise
+an error. Indexed ratio bands plus a bounded aspect cache replace full scans;
+the baseline tie-break and portrait/landscape symmetry are preserved.
 
-The selector searches all legal aligned buckets within the side/pixel limits.
-It first considers candidates within 1% aspect error, then up to the configured
-2% limit if necessary, and within that band chooses area closest to the target.
-The default maximum allows a small pixel-budget fluctuation; set `max_pixels` to
-`target_pixels` for a strict upper bound. Unrepresentable ratios raise an error
-with the best available deviation instead of silently cropping or padding.
-These dynamically generated buckets are provisional, not a final dataset-derived
-bucket list.
+The official 512-square center crop differs from these full-frame inputs, so
+preserving weight computations does **not** establish accuracy equivalence.
+Dataset evaluation and threshold calibration remain necessary.
 
-`BucketBatchSampler(sizes, batch_size, selector=selector)` groups indices into
-same-size batches. Supply `(width,height)` sizes **after EXIF correction** and use
-the same selector in preprocessing. Optional `shuffle=True`, `seed`, and
-`set_epoch()` give reproducible ordering; `drop_last=True` drops the final short
-batch of each bucket, otherwise every index appears once.
+## Dataset, losses and training API
 
-Preserving legacy weight computations does not establish unchanged accuracy:
-Kaloscope's original 512-square center-crop preprocessing differs from these
-full-frame dynamic inputs. Real-data evaluation and threshold calibration are
-still needed; no accuracy equivalence is claimed.
+Read the [dataset/mask and sampler contract](docs/DATASET.md) and
+[training/checkpoint interface](docs/TRAINING.md). SakuraPool supplies images and
+annotations. Tagger never crawls, downloads, silently reorders IDs, or interprets
+missing annotations as negatives.
 
-## Configurable global/local task heads
+T1 (`frozen_heads`) trains only the three new modules with detached backbone
+features. T2 (`finetune_last4`) enables DINOv3 blocks 8–11 and final norm; blocks
+0–7, embeddings and original Artist/Style stay frozen/eval. Last-four/norm
+modules follow train/eval mode, and their input path stays differentiable.
+Optional teacher preservation uses a separately loaded **original**, frozen
+Kaloscope only when explicitly configured; it is never a second student.
 
-```python
-from sakura_tagger.model import MultiTaskModel, read_head_config
-from sakura_tagger.training import multitask_loss
-specs, attention = read_head_config("configs/v1_dev.yaml")
-tagging_model = MultiTaskModel(backbone, specs, **attention)
-tagging_model.train()
-output = tagging_model(images)  # output.logits contains raw new-task logits
-losses = multitask_loss(output.logits, targets, specs, masks)
-losses.total.backward()
-# Only train parameters where requires_grad is True.
-prediction = tagging_model.predict(images, head_selection=["artist", "appearance", "class"])
-```
+Masked ASL defaults to gamma-positive 0, gamma-negative 4 and clipping 0.05.
+Character and Copyright are normalized/weighted independently. Masks are
+mandatory for provided targets. Chunked recomputation limits redundant FP32 loss
+intermediates; all-empty masks return differentiable zero. Trusted Other Artist
+single-label CE and multi-label ASL are explicit modes. Optional identity metric
+loss requires caller-supplied relations and is disabled by default.
 
-Each registry entry declares `group_name`, `group_type`, `num_classes`,
-`feature_mode`, `query_count`, `loss_weight`, `enabled`, and an optional threshold.
-The example provides six global and five local tasks with **placeholder** class
-counts. Disabled heads are not constructed or executed. Multi-label/binary heads
-use sigmoid only during prediction; mutually exclusive groups use softmax.
-Training always consumes raw logits.
+Trainer supports gradient accumulation, CPU BF16/CUDA AMP configuration,
+mask-aware evaluation, stage-aware optimizer updates, and complete boundary
+checkpoints. No training starts merely by importing or constructing it. This
+repository's V1 acceptance scope is CPU engineering only; real weights, GPU,
+large-scale distributed throughput, formal data and calibrated accuracy need
+separate validation.
 
-Local groups have independent learned queries (four by default), a shared
-256-dimensional key/value projection, and four attention heads. All active group
-queries share a single native PyTorch SDPA call and one key/value projection over
-the same patch sequence. Their pooled features are concatenated with global
-features before group-specific classification. The original DINOv3 runs once per
-input batch, regardless of the requested task count.
-
-Targets and masks are dictionaries keyed by group name. Multi-label and binary
-targets/masks have shape `[B,C]` (`C=1` for binary), and mutually exclusive targets/
-masks have shape `[B]`. Masks are true for known supervision. Unknown entries are
-selected out before evaluating losses, so masked NaNs or sentinel class IDs are
-safe. Each loss is normalized by its valid element/sample count, then multiplied
-by its configured weight. All-empty tasks return differentiable zero; absent
-target groups are skipped. Artist classification is excluded from new-task loss.
-
-`predict` returns requested legacy `artist` probabilities and `style_embedding`,
-`general_tags_by_group` entries containing `probabilities`, boolean `selected`,
-and `threshold`, plus probability tensors for requested single-label groups
-(`class`, `completeness`, and `corruption` in the example). An omitted selection
-requests all enabled heads. Thresholds are placeholders, not calibrated values.
-Save/load `tagging_model.state_dict()` with the same registry architecture for a
-complete strict roundtrip. `tagging_model.backbone.legacy.state_dict()` preserves
-and reloads the original model independently of the new heads.
-
-Future data integration needs per-group ordered label mappings consistent with
-class counts, image sizes after EXIF orientation, label tensors and supervision
-masks, train/validation splits, and validation-based threshold calibration. These
-are interfaces for future work; this implementation neither downloads a training
-dataset nor runs production training or P4.
+See [upstream/license boundaries](docs/UPSTREAM.md) before use or redistribution.
+This project does not grant a blanket MIT or Apache license.
