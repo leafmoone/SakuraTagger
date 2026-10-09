@@ -5,6 +5,10 @@ upstream DINOv3 weights are explicitly synthetic, not official-model evidence.
 """
 import argparse
 import json
+import random
+from pathlib import Path
+import tempfile
+from collections import Counter
 from unittest.mock import patch
 
 import torch
@@ -99,11 +103,116 @@ def check_model():
             'legacy_output_parity': 'PASS', 'selective_execution': 'PASS'}
 
 
+def synthetic_vocabulary():
+    from .data.contract import Vocabulary, VOCAB_VERSION
+    return Vocabulary({'version': VOCAB_VERSION,
+        'domains': {domain: [{'class_id': i, 'name': f'label_{i}'} for i in range(count)]
+                    for domain, count in (('general', 11), ('character', 13), ('copyright', 5), ('other_artist', 9))},
+        'original_artist': [{'class_id': i, 'name': f'synthetic_artist_{i}'} for i in range(7)]})
+
+
+def synthetic_records(count=12):
+    return [{'image_id': f'image_{i}', 'image_path': f'image_{i}.png', 'width': 32, 'height': 32,
+             'source': 'synthetic', 'RID': i, 'image_sha256': f'{i:064x}',
+             'split': 'train' if i < count - 2 else 'val', 'family_id': 'UNKNOWN',
+             'positive_labels': {'general': [i % 3], 'character': [0], 'copyright': [0]},
+             'supervision_scope': {'general': 'all', 'character': 'positive_only', 'copyright': [0, 1]},
+             'unknown_mask': {'general': [10]}} for i in range(count)]
+
+
+def check_data():
+    from .data import (BucketConfig, BucketSelector, BucketAspectError, BucketBatchSampler,
+                       encode_supervision, read_manifest, repeat_factors, SCHEMA_VERSION, Vocabulary)
+    vocabulary = synthetic_vocabulary()
+    records = synthetic_records()
+    metadata = {'schema_version': SCHEMA_VERSION, 'dataset_id': 'synthetic',
+                'provider': 'SakuraPool', 'vocab_sha256': vocabulary.sha256}
+    targets, masks = encode_supervision(records[0], vocabulary)
+    assert masks['other_artist'].sum() == 0 and masks['general'].sum() == 10
+    assert masks['character'].sum() == 1 and masks['copyright'].sum() == 2
+    assert vocabulary.document['domains']['character'][0]['name'] == vocabulary.document['domains']['copyright'][0]['name']
+    assert vocabulary.layout().identity == 18
+    rejected = 0
+    for operation in (
+        lambda: Vocabulary({**vocabulary.document, 'version': 'wrong'}),
+        lambda: Vocabulary({**vocabulary.document, 'domains': {**vocabulary.document['domains'],
+                            'general': [{'class_id': 1, 'name': 'wrong'}]}}),
+        lambda: encode_supervision({**records[0], 'positive_labels': {}}, vocabulary),
+        lambda: encode_supervision({**records[0], 'positive_labels': {'general': [99]}}, vocabulary),
+    ):
+        try:
+            operation()
+        except ValueError:
+            rejected += 1
+    assert rejected == 4
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'manifest.jsonl'
+        path.write_text('\n'.join(json.dumps(record) for record in records), encoding='utf-8')
+        assert read_manifest(path, metadata, vocabulary) == records
+        for changed in ({**metadata, 'schema_version': 'wrong'}, {**metadata, 'vocab_sha256': 'wrong'}):
+            try:
+                read_manifest(path, changed, vocabulary)
+            except ValueError:
+                rejected += 1
+    assert rejected == 6
+    factors, frequencies = repeat_factors(records, vocabulary, threshold=100)
+    assert factors == [3.0] * 10 and frequencies[('character', 0)] == 1
+    try:
+        repeat_factors(records + [records[0]], vocabulary)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('RFS accepted duplicate training images')
+    selector = BucketSelector(BucketConfig(target_pixels=2048, max_pixels=4096, max_side=128))
+    sizes = [(32, 32)] * 5 + [(64, 32)] * 3 + [(32, 64)] * 2
+    options = dict(selector=selector, shuffle=True, seed=21, repeat_weights=factors)
+    samplers = [BucketBatchSampler(sizes, 2, rank=rank, world_size=3, **options) for rank in range(3)]
+    occurrences = [item for sampler in samplers for batch in sampler.occurrence_batches() for item in batch]
+    assert len(occurrences) == len(set(oid for oid, _ in occurrences)) == 30
+    assert Counter(index for _, index in occurrences) == Counter({i: 3 for i in range(10)})
+    for sampler in samplers:
+        full = list(sampler)
+        assert full == list(sampler)
+        assert all(len({selector.select(*sizes[i]).target_size for i in batch}) == 1 for batch in full)
+        sampler.advance()
+        restored = BucketBatchSampler(sizes, 2, rank=sampler.rank, world_size=3, **options)
+        restored.load_state_dict(sampler.state_dict())
+        assert list(restored) == full[1:]
+    replacement = BucketBatchSampler([(32, 32)], 2, repeat_weights=[3], repeat_mode='replacement', epoch_size=10)
+    assert sum(len(batch) for batch in replacement) == 10 > 3
+    # Reference is deliberately retained only inside the durable acceptance tool.
+    comparisons = 0
+    rng = random.Random(19)
+    for config in (BucketConfig(), BucketConfig(max_pixels=512 * 512)):
+        indexed = BucketSelector(config)
+        sizes = [(1, 1), (16, 9), (9, 16), (400, 300), (100000, 1)]
+        sizes += [(rng.randint(16, 8192), rng.randint(16, 8192)) for _ in range(256)]
+        for width, height in sizes:
+            ratio = max(width, height) / min(width, height)
+            ranked = [(max((w / h) / ratio, ratio / (w / h)) - 1, w, h) for w, h in indexed._candidates]
+            valid = [x for x in ranked if x[0] <= config.preferred_error] or [x for x in ranked if x[0] <= config.max_error]
+            if not valid:
+                try:
+                    indexed.select(width, height)
+                except BucketAspectError:
+                    comparisons += 1
+                    continue
+                raise AssertionError('Unrepresentable ratio was accepted')
+            error, w, h = min(valid, key=lambda x: (abs(x[1] * x[2] - config.target_pixels), x[0], x[1], x[2]))
+            actual = indexed.select(width, height)
+            assert actual.target_size == ((h, w) if height > width else (w, h)) and actual.aspect_error == error
+            assert indexed.select(height, width).target_size == actual.target_size[::-1]
+            comparisons += 1
+    return {'bucket_reference_comparisons': comparisons, 'rank_unique_occurrences': len(occurrences),
+            'sampler_resume': 'PASS', 'RFS_cap': max(factors), 'replacement_realized_count': 10,
+            'manifest_and_vocabulary_rejections': rejected, 'unknown_supervision': 'PASS'}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
     torch.set_num_threads(1)
-    print(json.dumps({'synthetic_cpu': check_model(), 'real_weights': 'NOT_VERIFIED',
+    print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'real_weights': 'NOT_VERIFIED',
                       'CUDA': 'NOT_RUN', 'formal_training': 'NOT_RUN'}, indent=2))
 
 

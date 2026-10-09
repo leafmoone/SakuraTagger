@@ -1,5 +1,7 @@
 """Deterministic full-frame resolution choices with explicit aspect error."""
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+import math
 from functools import lru_cache
 
 
@@ -45,34 +47,51 @@ def _landscape_candidates(config):
     return tuple(candidates)
 
 
+@lru_cache(maxsize=32)
+def _ratio_index(config):
+    candidates = tuple(sorted(_landscape_candidates(config), key=lambda item: item[0] / item[1]))
+    return tuple(w / h for w, h in candidates), candidates
+
+
+@lru_cache(maxsize=65536)
+def _choose_ratio(config, numerator, denominator):
+    ratio = numerator / denominator
+    ratios, candidates = _ratio_index(config)
+    for limit in (config.preferred_error, config.max_error):
+        # Widen by an ULP before applying the original exact error expression.
+        # This preserves candidates at floating-point band boundaries.
+        lower = math.nextafter(ratio / (1 + limit), -math.inf)
+        upper = math.nextafter(ratio * (1 + limit), math.inf)
+        left, right = bisect_left(ratios, lower), bisect_right(ratios, upper)
+        valid = []
+        for w, h in candidates[left:right]:
+            error = max((w / h) / ratio, ratio / (w / h)) - 1
+            if error <= limit:
+                valid.append((error, w, h))
+        if valid:
+            return min(valid, key=lambda item: (
+                abs(item[1] * item[2] - config.target_pixels), item[0], item[1], item[2]))
+    position = bisect_left(ratios, ratio)
+    neighbors = ratios[max(0, position - 1):position + 1]
+    best = min(max(candidate / ratio, ratio / candidate) - 1 for candidate in neighbors)
+    raise BucketAspectError(
+        f"No bucket fits aspect {numerator}:{denominator} within {config.max_error:.2%}; "
+        f"best aspect error={best:.2%}, max_side={config.max_side}, max_pixels={config.max_pixels}"
+    )
+
+
 class BucketSelector:
     def __init__(self, config: BucketConfig | None = None):
         self.config = config or BucketConfig()
         self._candidates = _landscape_candidates(self.config)
+        _ratio_index(self.config)
 
     def select(self, width: int, height: int) -> BucketChoice:
-        if width <= 0 or height <= 0:
-            raise ValueError("Original width and height must be positive")
-        portrait = height > width
-        ratio = max(width, height) / min(width, height)
-        ranked = []
-        for w, h in self._candidates:
-            candidate_ratio = w / h
-            error = max(candidate_ratio / ratio, ratio / candidate_ratio) - 1
-            ranked.append((error, w, h))
-        preferred = [item for item in ranked if item[0] <= self.config.preferred_error]
-        valid = preferred or [item for item in ranked if item[0] <= self.config.max_error]
-        if not valid:
-            best = min(item[0] for item in ranked)
-            raise BucketAspectError(
-                f"No bucket fits aspect {width}:{height} within {self.config.max_error:.2%}; "
-                f"best aspect error={best:.2%}, max_side={self.config.max_side}, max_pixels={self.config.max_pixels}"
-            )
-        # Once inside an acceptable error band, favor the intended token budget.
-        error, w, h = min(valid, key=lambda item: (
-            abs(item[1] * item[2] - self.config.target_pixels), item[0], item[1], item[2]
-        ))
-        target = (h, w) if portrait else (w, h)
+        if not isinstance(width, int) or not isinstance(height, int) or min(width, height) <= 0:
+            raise ValueError("Original width and height must be positive integers")
+        divisor = math.gcd(width, height)
+        error, w, h = _choose_ratio(self.config, max(width, height) // divisor, min(width, height) // divisor)
+        target = (h, w) if height > width else (w, h)
         pixels = w * h
         return BucketChoice((width, height), target, error,
                             pixels // self.config.alignment ** 2,
