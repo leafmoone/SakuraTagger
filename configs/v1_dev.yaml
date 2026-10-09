@@ -1,16 +1,22 @@
-# Placeholder class counts and thresholds, not a calibrated tag vocabulary.
-attention:
-  hidden_dim: 256
-  num_heads: 4
-heads:
-  - {group_name: composition, group_type: multilabel, num_classes: 5, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
-  - {group_name: environment, group_type: multilabel, num_classes: 6, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
-  - {group_name: visual_medium, group_type: multilabel, num_classes: 4, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
-  - {group_name: class, group_type: multiclass, num_classes: 3, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true}
-  - {group_name: completeness, group_type: multiclass, num_classes: 3, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true}
-  - {group_name: corruption, group_type: binary, num_classes: 1, feature_mode: global, query_count: 4, loss_weight: 1.0, enabled: true}
-  - {group_name: appearance, group_type: multilabel, num_classes: 7, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
-  - {group_name: expression, group_type: multilabel, num_classes: 4, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
-  - {group_name: clothing, group_type: multilabel, num_classes: 6, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
-  - {group_name: pose_action, group_type: multilabel, num_classes: 5, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
-  - {group_name: objects, group_type: multilabel, num_classes: 8, feature_mode: local, query_count: 4, loss_weight: 1.0, enabled: true, threshold: 0.5}
+# Candidate sizes only. The versioned dataset vocabulary is authoritative.
+head_layout:
+  version: sakura-tagger-heads-v1
+  general: 37679
+  character: 50369
+  copyright: 17664
+  other_artist: 21506
+  feature_dim: 512
+  attention_dim: 256
+  attention_heads: 4
+  query_count: 16
+stage: frozen_heads
+loss:
+  gamma_pos: 0
+  gamma_neg: 4
+  clip: 0.05
+  chunk_size: 4096
+  other_artist_mode: multilabel
+  weights: {general: 1.0, character: 1.0, copyright: 1.0, other_artist: 1.0}
+rfs: {threshold: 0.001, max_repeat_factor: 3.0}
+preservation: {global_features: 0.0, style_embedding: 0.0, artist_logits: 0.0}
+identity_metric_weight: 0.0

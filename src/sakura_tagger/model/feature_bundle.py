@@ -8,5 +8,5 @@ class FeatureBundle:
     global_features: Tensor
     cls_tokens: Tensor
     patch_tokens: Tensor
-    artist_logits: Tensor
-    style_embedding: Tensor
+    artist_logits: Tensor | None = None
+    style_embedding: Tensor | None = None
