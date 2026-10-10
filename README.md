@@ -96,11 +96,53 @@ Selectable names are `general`, `character`, `copyright`, `other_artist`,
 Identity and unrelated legacy branches are physically skipped when unselected;
 requesting either identity domain executes the shared Identity module once.
 Prediction defaults to Top-K, not full dense probabilities; `dense=True` is an
-explicit opt-in. Original Artist retains its original softmax semantics, and all
-four new domains use independent sigmoids. Uncalibrated original/other Artist
-scores are never combined into one ranking. Call `eval()` before inference.
+explicit opt-in. Original Artist retains its original full-vocabulary softmax.
+General/Character/Copyright use independent sigmoids. Other Artist uses full
+softmax in `single_label` mode, or sigmoid in legacy `multilabel` mode. Set
+`MultiTaskModel(..., other_artist_mode="single_label")` for a CE-trained model;
+Trainer propagates its effective `LossConfig.other_artist_mode` automatically.
+The old constructor retains `multilabel` for compatibility; it does not infer a
+training objective from weights. Uncalibrated original/other Artist scores are
+never combined into one ranking. Call `eval()` before inference.
 `configs/v1_dev.yaml` is a formal candidate architecture/training configuration;
 old per-semantic-group neural heads have been removed.
+
+## Source-filtered inference
+
+`source_filter` is inference postprocessing, not retraining. Membership describes
+which source's original **tag vocabulary** contains a label, never the source of
+an image. Cross-source training remains unchanged. No membership is guessed
+from names, image provenance or missing annotations.
+
+```python
+from sakura_tagger.data import SourceMembership
+membership = SourceMembership.read("vocab/source_membership.parquet", vocabulary)
+model.set_source_membership(membership)
+prediction = model.predict(images, ["general", "character", "copyright", "artist",
+                                     "other_artist", "style_embedding"],
+                           source_filter=["danbooru", "gamecg"], top_k=50)
+# Sources form a deduplicated union. Single-source strings also work.
+# Classification results keep ORIGINAL domain-local IDs, with at most 50 entries.
+names = [membership.class_name("general", int(i))
+         for i in prediction["general"]["class_ids"][0]]
+```
+
+Install `python -m pip install -e '.[parquet]'` only when using Parquet. Ordinary
+model loading and in-memory membership do not import PyArrow. The
+[source membership interface](docs/SOURCE_MEMBERSHIP.md) defines metadata,
+validation, source unions, empty results and filtered dense ID/score alignment.
+`source_filter=None` retains the existing output contract. Missing indexes and
+unknown sources fail closed. Filtering precedes Top-K, after complete Artist
+softmax; no subset renormalization or second DINOv3 forward occurs. Style remains
+unchanged, including the official model's 256D output.
+
+The sidecar can be appended to a new Dataset Release independently of TAR
+shards. SakuraPool's producer must supply the real vocabulary-bound Parquet.
+Current acceptance covers synthetic membership and a genuinely written/read
+synthetic Parquet, **not verified real Danbooru/Zerochan/GameCG membership**.
+Selfcheck reports the Parquet case as `NOT_VERIFIED` if PyArrow is absent; install
+the extra above for the full 15-case source-filter acceptance. No dataset or
+model-weight download or formal training is part of this feature.
 
 ## Native full-frame buckets
 

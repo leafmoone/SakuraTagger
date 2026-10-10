@@ -68,6 +68,7 @@ class Trainer:
         if self.device.type not in ('cpu', 'cuda') or self.config.amp == 'fp16' and self.device.type != 'cuda':
             raise ValueError('Trainer supports CPU/CUDA; FP16 AMP requires CUDA')
         self.model = model.to(self.device)
+        self.model.set_other_artist_mode(self.loss_config.other_artist_mode)
         self.model.set_stage(self.config.stage)
         self.metadata = dict(metadata)
         if self.metadata.get('head_layout') != self.model.layout.to_dict() or self.metadata.get('stage_config') != {'stage': self.model.backbone.stage}:

@@ -11,6 +11,7 @@ dependencies = ["torch>=2.5", "safetensors>=0.4", "numpy>=1.26", "Pillow>=10", "
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+parquet = ["pyarrow>=14"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

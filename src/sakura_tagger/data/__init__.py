@@ -10,3 +10,7 @@ from .rfs import repeat_factors
 
 __all__ += ['SCHEMA_VERSION', 'Vocabulary', 'ManifestDataset', 'encode_supervision',
             'read_manifest', 'validate_metadata', 'validate_record', 'repeat_factors']
+
+from .source_membership import SourceMembership, SOURCE_MEMBERSHIP_VERSION
+
+__all__ += ['SourceMembership', 'SOURCE_MEMBERSHIP_VERSION']

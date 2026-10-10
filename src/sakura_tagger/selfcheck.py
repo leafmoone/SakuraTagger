@@ -19,7 +19,7 @@ from .model import HeadLayout, KaloscopeBackbone, MultiTaskModel, artist_classif
 from .upstream import model_loading
 
 
-def synthetic_fixture(seed=0):
+def synthetic_fixture(seed=0, *, style_dim=8):
     upstream = model_loading()
     from kaloscope_dinov3.architecture import build_backbone
     options = {'name': 'custom_vit', 'kwargs': {
@@ -31,7 +31,7 @@ def synthetic_fixture(seed=0):
         torch.manual_seed(seed)
         model = upstream.DinoInferenceModel(
             build_backbone(options), 'cls_mean', nn.Linear(64, 7),
-            nn.Sequential(nn.Linear(64, 32), nn.GELU(), nn.Linear(32, 8)),
+            nn.Sequential(nn.Linear(64, 32), nn.GELU(), nn.Linear(32, style_dim)),
             'projector', 'l2_sqrt_dim')
         model.register_buffer('log_temperature', torch.tensor(0.0))
         model.register_buffer('bias', torch.tensor(0.0))
@@ -357,6 +357,175 @@ def check_training():
             'KD_losses': kd_result['auxiliary'], 'CPU_BF16_AMP': 'PASS'}
 
 
+def check_source_membership():
+    """Fifteen CPU checks; real mapping/weights remain explicitly unverified."""
+    from .data import SourceMembership, SOURCE_MEMBERSHIP_VERSION, BucketConfig
+    from .data.contract import SCHEMA_VERSION, manifest_fingerprint
+    from .training import LossConfig, Trainer, checkpoint_metadata, multitask_loss
+    vocabulary = synthetic_vocabulary()
+    binding = {'vocab_version': vocabulary.document['version'], 'vocab_sha256': vocabulary.sha256}
+    records = [{'domain': domain, 'class_id': class_id, 'source': source}
+               for domain in vocabulary.class_id_mapping
+               for class_id, source in ((0, 'danbooru'), (2, 'danbooru'), (1, 'zerochan'),
+                                        (2, 'zerochan'), (3, 'gamecg'))]
+    # A known source with candidates only in General exercises empty domains.
+    records.append({'domain': 'general', 'class_id': 4, 'source': 'general_only'})
+    membership = SourceMembership.from_records(records, vocabulary, **binding)
+    model = MultiTaskModel(KaloscopeBackbone(synthetic_fixture(style_dim=256)),
+                           vocabulary.layout(feature_dim=32, attention_dim=16)).eval()
+    images = torch.randn(2, 3, 32, 48)
+    before = {key: value.clone() for key, value in model.state_dict().items()}
+    parameters = [(id(p), p.requires_grad) for p in model.parameters()]
+    raw = model(images)
+    old = {name: logits.softmax(-1) if name == 'artist' else logits.sigmoid()
+           for name, logits in raw.logits.items()}
+    original_dense = model.predict(images, dense=True)
+    model.set_source_membership(membership)
+    dense = model.predict(images, source_filter=None, dense=True)
+    for name, reference in old.items():
+        torch.testing.assert_close(dense[name], reference, rtol=0, atol=0)
+        torch.testing.assert_close(dense[name], original_dense[name], rtol=0, atol=0)
+        scores, ids = reference.topk(3, dim=-1)
+        actual = model.predict(images, [name], top_k=3)[name]
+        torch.testing.assert_close(actual['scores'], scores, rtol=0, atol=0)
+        assert torch.equal(actual['class_ids'], ids)
+    checks = {'01_legacy_no_filter_parity': 'PASS'}
+    for number, source, expected in ((2, 'danbooru', [0, 2]), (3, 'zerochan', [1, 2]),
+                                      (4, ['danbooru', 'zerochan', 'danbooru'], [0, 1, 2])):
+        filtered = model.predict(images, source_filter=source, dense=True)
+        for name in raw.logits:
+            assert filtered[name]['class_ids'].tolist() == [expected] * 2
+            torch.testing.assert_close(filtered[name]['scores'], old[name][:, expected])
+        checks[f'{number:02}_source_{number}_IDs_scores'] = 'PASS'
+    # Force all unrestricted maxima outside Danbooru; filtering after Top-K fails.
+    forced_logits = {name: torch.arange(logits.shape[-1], dtype=logits.dtype).expand_as(logits)
+                     for name, logits in raw.logits.items()}
+    from .model.multi_task_model import MultiTaskOutput
+    with patch.object(model, 'forward', return_value=MultiTaskOutput(raw.features, forced_logits)):
+        filtered = model.predict(images, source_filter='danbooru', top_k=1)
+        assert all(value['class_ids'].tolist() == [[2], [2]] for name, value in filtered.items()
+                   if name != 'style_embedding')
+    checks['05_filter_before_top_k'] = 'PASS'
+    filtered = model.predict(images, source_filter='danbooru', top_k=50)
+    for name in raw.logits:
+        assert filtered[name]['scores'].shape == (2, 2)
+        assert all(set(row) == {0, 2} for row in filtered[name]['class_ids'].tolist())
+        expected = old[name].gather(1, filtered[name]['class_ids'])
+        torch.testing.assert_close(filtered[name]['scores'], expected)
+    assert membership.class_name('general', 0) == membership.class_name('character', 0) == 'label_0'
+    assert model.predict(images, (name for name in ['general']), source_filter='danbooru')['general']['scores'].shape == (2, 2)
+    checks['06_original_IDs_and_domain_name_lookup'] = 'PASS'
+    torch.testing.assert_close(filtered['artist']['scores'], old['artist'].gather(1, filtered['artist']['class_ids']))
+    assert (filtered['artist']['scores'].sum(-1) < 1).all()
+    checks['07_original_artist_full_softmax'] = 'PASS'
+    model.set_other_artist_mode('single_label')
+    probabilities = model.predict(images, ['other_artist'], dense=True)['other_artist']
+    torch.testing.assert_close(probabilities, raw.logits['other_artist'].softmax(-1))
+    subset = model.predict(images, ['other_artist'], source_filter='danbooru', dense=True)['other_artist']
+    torch.testing.assert_close(subset['scores'], probabilities[:, [0, 2]])
+    assert (subset['scores'].sum(-1) < 1).all()
+    checks['08_other_artist_configured_full_softmax'] = 'PASS'
+    assert filtered['style_embedding'].shape == (2, 256)
+    torch.testing.assert_close(filtered['style_embedding'], raw.features.style_embedding, rtol=0, atol=0)
+    style_only = model.predict(images, ['style_embedding'], source_filter='general_only')
+    assert set(style_only) == {'style_embedding'}
+    torch.testing.assert_close(style_only['style_embedding'], raw.features.style_embedding)
+    checks['09_unchanged_256D_style'] = 'PASS'
+    def rejects(operation):
+        try:
+            operation()
+        except (ValueError, TypeError):
+            return
+        raise AssertionError('Invalid source membership/filter was accepted')
+    model.set_source_membership(None)
+    with patch.object(model.backbone.legacy.backbone, 'forward_features') as call:
+        rejects(lambda: model.predict(images, source_filter='danbooru'))
+        assert call.call_count == 0
+    model.set_source_membership(membership)
+    for invalid in ('missing', ['danbooru', 'missing'], [], [1], 1):
+        rejects(lambda: model.predict(images, source_filter=invalid))
+    checks['10_missing_index_unknown_source_fail_closed'] = 'PASS'
+    rejects(lambda: SourceMembership.from_records(records, vocabulary, **{**binding, 'vocab_sha256': '0' * 64}))
+    rejects(lambda: SourceMembership.from_records(records, vocabulary, **{**binding, 'vocab_version': 'wrong'}))
+    rejects(lambda: SourceMembership.from_records(records, vocabulary, **binding, schema_version='wrong'))
+    checks['11_SHA_and_version_mismatch_rejected'] = 'PASS'
+    for row in ({'domain': 'artist', 'class_id': 7, 'source': 'danbooru'},
+                {'domain': 'general', 'class_id': -1, 'source': 'danbooru'},
+                {'domain': 'general', 'class_id': True, 'source': 'danbooru'},
+                {'domain': 'general', 'class_id': 0.0, 'source': 'danbooru'},
+                {'domain': 'unknown', 'class_id': 0, 'source': 'danbooru'},
+                {'domain': 'general', 'class_id': 0, 'source': 'Danbooru'}):
+        rejects(lambda: SourceMembership.from_records([row], vocabulary, **binding))
+    rejects(lambda: SourceMembership.from_records(records + [records[0]], vocabulary, **binding))
+    for is_dense in (False, True):
+        empty = model.predict(images, ['character', 'artist'], dense=is_dense, source_filter='general_only')
+        assert all(value['class_ids'].shape == value['scores'].shape == (2, 0) for value in empty.values())
+    checks['12_empty_candidates_invalid_IDs_duplicates'] = 'PASS'
+    with patch.object(model.backbone.legacy.backbone, 'forward_features',
+                      wraps=model.backbone.legacy.backbone.forward_features) as call:
+        model.predict(images, source_filter=['danbooru', 'zerochan'])
+        assert call.call_count == 1
+    checks['13_single_DINOv3_forward'] = 'PASS'
+    assert [(id(p), p.requires_grad) for p in model.parameters()] == parameters
+    assert before.keys() == model.state_dict().keys()
+    for key, value in before.items():
+        torch.testing.assert_close(value, model.state_dict()[key], rtol=0, atol=0)
+    after = model(images)
+    for name in raw.logits:
+        torch.testing.assert_close(raw.logits[name], after.logits[name], rtol=0, atol=0)
+    targets, masks = {'other_artist': torch.tensor([0, 2])}, {'other_artist': torch.ones(2, dtype=torch.bool)}
+    ce = LossConfig(other_artist_mode='single_label')
+    torch.testing.assert_close(multitask_loss(raw.logits, targets, ce, masks).total,
+                               multitask_loss(after.logits, targets, ce, masks).total)
+    metadata = checkpoint_metadata(model, vocabulary, {
+        'schema_version': SCHEMA_VERSION, 'dataset_id': 'synthetic', 'provider': 'SakuraPool',
+        'vocab_sha256': vocabulary.sha256, 'manifest_sha256': manifest_fingerprint(synthetic_records())},
+        BucketConfig(), 'synthetic-original-v1')
+    with tempfile.TemporaryDirectory() as directory:
+        trainer = Trainer(model, metadata, loss_config=ce)
+        assert model.other_artist_mode == 'single_label'
+        path = Path(directory) / 'membership.pt'
+        trainer.save_checkpoint(path)
+        restored_model = MultiTaskModel(KaloscopeBackbone(synthetic_fixture(style_dim=256)), model.layout)
+        restored = Trainer(restored_model, metadata, loss_config=ce)
+        restored.load_checkpoint(path)
+        assert restored_model._source_membership is None and restored_model.other_artist_mode == 'single_label'
+        restored_model.eval()
+        torch.testing.assert_close(restored_model.predict(images, ['other_artist'], dense=True)['other_artist'], probabilities)
+        restored_model.set_source_membership(membership)
+        torch.testing.assert_close(restored_model.predict(images, ['other_artist'], source_filter='danbooru', dense=True)['other_artist']['scores'], subset['scores'])
+        Trainer(restored_model, metadata, loss_config=LossConfig())
+        assert restored_model.other_artist_mode == 'multilabel'
+    checks['14_parameters_forward_loss_checkpoint_unchanged'] = 'PASS'
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError:
+        checks['15_real_Parquet_read_and_schema'] = 'NOT_VERIFIED: install sakura-tagger[parquet]'
+    else:
+        schema = pa.schema([('domain', pa.string()), ('class_id', pa.int64()), ('source', pa.string()),
+                            ('namespace', pa.string()), ('evidence_type', pa.string())],
+                           metadata={key.encode(): value.encode() for key, value in {
+                               'schema_version': SOURCE_MEMBERSHIP_VERSION, **binding}.items()})
+        table = pa.Table.from_pylist(records, schema=schema)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source_membership.parquet'
+            pq.write_table(table, path)
+            loaded = SourceMembership.read(path, vocabulary)
+            for domain in vocabulary.class_id_mapping:
+                assert loaded.allowed_ids(domain, ['danbooru', 'zerochan']) == (0, 1, 2)
+            model.set_source_membership(loaded).eval()
+            torch.testing.assert_close(model.predict(images, ['general'], source_filter='danbooru', dense=True)['general']['scores'], old['general'][:, [0, 2]])
+            for invalid in (table.drop(['source']), table.replace_schema_metadata({}),
+                            table.set_column(1, 'class_id', pa.array([float(r['class_id']) for r in records])),
+                            table.replace_schema_metadata({**schema.metadata, b'vocab_sha256': b'wrong'}),
+                            pa.concat_tables([table, table.slice(0, 1)])):
+                pq.write_table(invalid, path)
+                rejects(lambda: SourceMembership.read(path, vocabulary))
+        checks['15_real_Parquet_read_and_schema'] = 'PASS'
+    return {**checks, 'real_source_mapping': 'NOT_VERIFIED'}
+
+
 def production_head_counts():
     from .model.modules import GeneralModule, IdentityModule, OtherArtistModule
     layout = HeadLayout(37679, 50369, 17664, 21506)
@@ -387,7 +556,8 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(1)
     print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'losses': check_losses(),
-                      'training': check_training(), 'candidate_production_heads': production_head_counts(),
+                      'training': check_training(), 'source_membership': check_source_membership(),
+                      'candidate_production_heads': production_head_counts(),
                       'real_weights': check_real_weights(args.real_model_dir) if args.real_model_dir else 'NOT_VERIFIED',
                       'CUDA': 'NOT_RUN', 'formal_training': 'NOT_RUN'}, indent=2))
 
