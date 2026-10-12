@@ -4,6 +4,7 @@ The shuffle is window-local, not a uniform global permutation. Only acknowledged
 control steps are committed; iterator lookahead and image/cache reads are not.
 """
 from collections import Counter, defaultdict
+from copy import copy
 from dataclasses import dataclass
 import hashlib
 import heapq
@@ -320,19 +321,32 @@ class ShardWindowSampler:
         return {'version': SAMPLER_VERSION, 'signature': self._signature(),
                 'epoch': self.epoch, 'window': self.window, 'cursor': self.cursor}
 
-    def load_state_dict(self, state):
+    def prepare_restore(self, state):
+        """Rebuild on a temporary sampler; rejection never advances this consumer.
+
+        Reconstructing a valid window may refill an evictable shard cache or its
+        dimension corrections, but neither is committed optimizer progress.
+        """
         if state.get('version') != SAMPLER_VERSION or state.get('signature') != self._signature():
             raise ValueError('Sampler identity/configuration mismatch; use an explicit new run')
-        self.set_epoch(state['epoch'])
-        if type(state['window']) is not int or not 0 <= state['window'] <= len(self._schedule):
+        if any(type(state.get(name)) is not int or state[name] < 0 for name in ('epoch', 'window', 'cursor')):
+            raise ValueError('Invalid saved sampler position')
+        prospective = copy(self)
+        prospective.set_epoch(state['epoch'])
+        if state['window'] > len(prospective._schedule):
             raise ValueError('Invalid saved window')
-        self.window = state['window']
-        if self.epoch_done:
+        prospective.window = state['window']
+        if prospective.epoch_done:
             if state['cursor'] != 0:
                 raise ValueError('Invalid completed-epoch cursor')
         else:
-            self.prepare_window()  # Bounded deterministic replay, including actual dimensions.
-            self.advance(state['cursor'])
+            prospective.prepare_window()  # Bounded deterministic actual-shape replay.
+            prospective.advance(state['cursor'])
+        return prospective
+
+    def load_state_dict(self, state):
+        prospective = self.prepare_restore(state)
+        self.__dict__.update(prospective.__dict__)
 
 
 def _collate_numpy(samples):

@@ -113,7 +113,7 @@ class CoordinatedTrainingError(RuntimeError):
 
 
 class WindowTrainer:
-    def __init__(self, model, release, scope, loss_config, *, config=None, device='cpu', teacher=None):
+    def __init__(self, model, release, scope, loss_config, *, config=None, device='cpu', teacher=None, teacher_source=None):
         self.config = config or WindowTrainerConfig()
         self.release, self.scope, self.loss_config = release, scope, loss_config
         self.device = torch.device(device)
@@ -132,6 +132,8 @@ class WindowTrainer:
         self.model = model.to(self.device).set_stage(self.config.stage)
         self.config = replace(self.config, stage=self.model.backbone.stage)
         self.teacher = self._teacher(teacher)
+        from .window_checkpoint import teacher_identity
+        self.teacher_identity = teacher_identity(self.teacher, teacher_source)
         self._assert_same_contract()
         self.optimizer = self._new_optimizer()
         self.scheduler = UpdateSchedule(self.optimizer, self.config)
@@ -160,7 +162,8 @@ class WindowTrainer:
     def contract(self):
         return {'trainer': asdict(self.config), 'loss': self.loss_config.to_dict(), 'scope': self.scope.identity,
                 'release': self.release.identity, 'layout': self.model.layout.to_dict(),
-                'normalization': 'global_valid_image_per_domain_v1', 'world_size': self.world_size}
+                'normalization': 'global_valid_image_per_domain_v1', 'world_size': self.world_size,
+                'teacher': self.teacher_identity}
 
     def _assert_same_contract(self):
         if self.distributed:
@@ -377,6 +380,14 @@ class WindowTrainer:
                            for i, name in enumerate(LOGICAL_DOMAINS)},
                 'skip_reason': None if success else 'nonfinite' if bad_window or not finite_gradients else 'empty_gradient',
                 'gradient_norm': float(norm.item()) if torch.isfinite(norm) else None, 'counters': dict(self.counters)}
+
+    def save_checkpoint(self, path, *, sampler):
+        from .window_checkpoint import save_checkpoint
+        return save_checkpoint(self, path, sampler)
+
+    def load_checkpoint(self, path, *, sampler):
+        from .window_checkpoint import load_checkpoint
+        return load_checkpoint(self, path, sampler)
 
     def run(self, sampler, *, num_workers=0, worker_transport='shared_memory', worker_timeout=60., on_boundary=None):
         """Explicit finite run. A skipped update cannot create an endless loop."""

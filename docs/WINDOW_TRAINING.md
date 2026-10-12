@@ -59,9 +59,8 @@ real exposures, and control steps are separate counters.
 trainable membership, and rebuilds both optimizer and reducer. Shared Adam moments
 are retained; the stage's LR schedule restarts. Lifetime counters remain, so an
 explicit new phase must choose appropriate limits. Do not retain/use an old DDP
-wrapper after a stage transition. E6 owns complete multi-rank checkpoint files and
-publication; `at_boundary`, counters, optimizer, scheduler, scaler, contract and
-E4 sampler state expose the required boundary data.
+wrapper after a stage transition. [Window checkpoints](WINDOW_CHECKPOINTS.md) save complete multi-rank boundary
+state and publish a completion manifest only after every rank's files succeed.
 
 ## Optional preservation and loaders
 

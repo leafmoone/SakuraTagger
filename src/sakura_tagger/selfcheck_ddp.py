@@ -61,12 +61,12 @@ def training_fixture(root):
     return release
 
 
-def make_components(root, *, rank=0, world_size=1, stage='T1', accumulation_steps=2, amp='off', preservation=None):
+def make_components(root, *, rank=0, world_size=1, stage='T1', accumulation_steps=2, amp='off', preservation=None, cache_root=None):
     root = Path(root)
     release = DatasetRelease.read(root / 'published/release.json')
     index = SparseReleaseIndex(root / 'index.sqlite', release=release)
     assets = SamplingAssets(root / 'assets', index)
-    cache = ShardCache(root / 'cache', release, LocalShardProvider(release), capacity_bytes=65536, job_id='training')
+    cache = ShardCache(cache_root or root / 'cache', release, LocalShardProvider(release), capacity_bytes=65536, job_id='training')
     dataset = TarDataset(index, cache, corrections=DimensionCorrections(root / 'dimensions.sqlite', release),
                          preprocessor=NativePreprocessor(BucketSelector(BucketConfig(target_pixels=1024, max_pixels=4096, max_side=64))))
     sampler = ShardWindowSampler(assets, dataset, 2, window_samples=32, seed=47, rank=rank, world_size=world_size)
@@ -80,7 +80,8 @@ def make_components(root, *, rank=0, world_size=1, stage='T1', accumulation_step
                                  preservation=preservation or {'global_features': 0., 'style_embedding': 0., 'artist_logits': 0.})
     teacher = KaloscopeBackbone(synthetic_fixture(12)) if preservation else None
     trainer = WindowTrainer(model, release, WeakNegativeScope.from_index(index), loss_config,
-                            config=config, teacher=teacher)
+                            config=config, teacher=teacher,
+                            teacher_source='synthetic_fixture:v1:seed=12' if teacher is not None else None)
     return trainer, sampler, cache
 
 
@@ -161,8 +162,10 @@ def _worker(root):
         assert 'backbone_last4' in {group['name'] for group in trainer.optimizer.param_groups}
         assert trainer.run(sampler)['successful_updates'] == 2
         cache.close()
+        from .selfcheck_checkpoint import check_distributed_checkpoint
+        checkpoint_result = check_distributed_checkpoint(root)
         (Path(root) / f'worker{rank}.json').write_text(json.dumps({'rank': rank, 'data_failure': 'PASS',
-            'nonfinite_skip_then_update': 'PASS', 'stage_DDP_rebuild': 'PASS', 'sampler_signature_mismatch': 'PASS'}))
+            'nonfinite_skip_then_update': 'PASS', 'stage_DDP_rebuild': 'PASS', 'sampler_signature_mismatch': 'PASS', 'checkpoint_resume': checkpoint_result}))
     finally:
         dist.destroy_process_group()
 
@@ -397,7 +400,7 @@ def check_ddp():
                 'empty_gradient_no_AdamW_decay_finite_end': 'PASS',
                 'legacy_exact_unequal_mask_short_tail_error': legacy_error,
                 'legacy_committed_cursor_and_normalization_identity': 'PASS',
-                'CPU_BF16_independent_teacher': 'PASS', 'CUDA_NCCL_FP16': 'NOT_VERIFIED',
+                'CPU_BF16_independent_teacher': 'PASS', 'same_world_checkpoint_resume': 'PASS', 'CUDA_NCCL_FP16': 'NOT_VERIFIED',
                 'default_worker_tensor_FD_IPC': 'NOT_VERIFIED'}
 
 
