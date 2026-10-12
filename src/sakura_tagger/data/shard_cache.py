@@ -106,6 +106,9 @@ def provider_for_release(release, *, loopback_url=None, timeout=30, read_timeout
     kind = release.source['provider']
     if kind == 'local':
         return LocalShardProvider(release, timeout=timeout)
+    if kind == 'modelscope':
+        from .modelscope import ModelScopeShardProvider
+        return ModelScopeShardProvider(release, timeout=timeout, read_timeout=read_timeout)
     if kind == 'huggingface':
         return HuggingFaceShardProvider(release, timeout=timeout, read_timeout=read_timeout)
     if kind == 'loopback' and loopback_url:

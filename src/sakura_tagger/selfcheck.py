@@ -571,6 +571,7 @@ def run_selfcheck(suite='all', *, real_model_dir=None, skip_ddp_reason=None):
     torch.set_num_threads(1)
     from .selfcheck_architecture import check_architecture
     from .selfcheck_release import check_release
+    from .selfcheck_sakuratool import check_sakuratool
     from .selfcheck_positive_unknown import check_positive_unknown
     from .selfcheck_tar import check_tar
     from .selfcheck_sampling import check_sampling
@@ -583,7 +584,7 @@ def run_selfcheck(suite='all', *, real_model_dir=None, skip_ddp_reason=None):
         return ({'status': 'NOT_VERIFIED', 'reason': skip_ddp_reason, 'attempted': False}
                 if skip_ddp_reason is not None else check_ddp())
     suites = {'architecture': check_architecture, 'source': check_source_membership,
-              'release': check_release, 'positive_unknown': check_positive_unknown,
+              'release': check_release, 'sakuratool': check_sakuratool, 'positive_unknown': check_positive_unknown,
               'tar': check_tar, 'sampling': check_sampling, 'window_trainer': check_window_trainer,
               'checkpoint': check_checkpoint, 'evaluation': check_evaluation, 'deployment': check_deployment,
               'integration': check_integration, 'ddp': ddp}

@@ -221,8 +221,9 @@ Dataset evaluation and threshold calibration remain necessary.
 
 Read the [dataset/mask and sampler contract](docs/DATASET.md) and
 [training/checkpoint interface](docs/TRAINING.md). SakuraPool supplies images and
-annotations. Tagger never crawls, downloads, silently reorders IDs, or interprets
-missing annotations as negatives.
+annotations. Tagger never crawls or silently reorders IDs, and never interprets
+missing annotations as negatives. Explicit immutable-release providers can download
+manifest-listed artifacts into the bounded local cache.
 
 T1 (`frozen_heads`) trains only the three new modules with detached backbone
 features. T2 (`finetune_last4`) enables DINOv3 blocks 8–11 and final norm; blocks
@@ -247,3 +248,45 @@ separate validation.
 
 See [upstream/license boundaries](docs/UPSTREAM.md) before use or redistribution.
 This project does not grant a blanket MIT or Apache license.
+
+## Selected SakuraTool dataset (ModelScope)
+
+Future training uses `configs/sakuratool_modelscope.yaml`. It pins
+`leafmoone/SakuraTool-dataset` at commit
+`1eb4ebd70f203bf465338fec1a4cb2aca6234ea1` and explicitly selects
+`metadata/releases/v1-eligible-near5GiB-000002/release_manifest.json`.
+The repository-root manifest is an older 100-image canary and is not used.
+
+```sh
+pip install -e '.[parquet]'
+python -m sakura_tagger prepare-dataset --config configs/sakuratool_modelscope.yaml
+python -m sakura_tagger build-local-index --config configs/sakuratool_modelscope.yaml
+python -m sakura_tagger preflight --config configs/sakuratool_modelscope.yaml
+```
+
+Preparation downloads only the selected manifest, five vocabulary CSVs and its
+four listed Parquet indices, then adapts them to the existing sparse reader.
+The output directory must be empty; prepared metadata is not overwritten.
+Failed preparation may leave partial converted metadata, but never publishes
+`release.json`. Retry in a new output directory, or remove only your own failed
+preparation files before retrying.
+There are 3,654 published samples (3,638 train / 8 val / 8 test), with four TARs
+and 5,527,265,280 total TAR bytes. Planned images and unlisted shards are excluded.
+The provider streams only whitelisted files at that exact commit into the bounded
+shard cache; it does not consult credentials or scan remote directories.
+
+The adapter preserves domain-local class order, all original producer row facts
+and source provenance. Missing labels stay unknown. Only explicitly confirmed
+single Other Artist evidence enters CE; producer-reported artist conflicts remain
+conflicts even when a conflicting name is outside the frozen vocabulary. Raw
+source dimensions remain unverified until actual image decode and EXIF handling.
+Producer vocabulary hashes and Tagger canonical vocabulary hashes are separate
+identities. Selected TAR JSON is checked against its producer index, rather than
+being misidentified as reference-fixture JSON.
+
+These commands do not start training or prove full TAR-reader acceptance. Supply
+official Kaloscope weights, verify the intended GPU/runtime and the full released
+dataset reader before a formal run. Training endpoints remain unset until chosen
+explicitly. The 8-image validation and test splits are smoke-test cohorts, not
+credible model-quality acceptance sets. Local caches, converted metadata and
+validation output stay outside version control.

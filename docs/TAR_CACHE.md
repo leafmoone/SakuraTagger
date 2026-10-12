@@ -44,11 +44,13 @@ cache, read token files, or infer credentials. The CPU lock pins the actual
 `huggingface-hub==2.2.0`. Missing/private access fails explicitly; authentication
 is a separate authorized integration, not an implicit environment lookup.
 
-ModelScope is currently unsupported: a non-main branch name or an API that
-ignores revision does not prove immutable content. A real producer's hosting
-handoff may require an additional verified adapter. No production remote
-transfer or remote 5 GiB upload has been tested. SDK URL construction is only a
-local API check.
+`ModelScopeShardProvider` uses the official dataset `repo` download route with
+an explicit full commit (the `repo/files` route may return Git LFS pointers).
+Only descriptors in the selected release inventory are admitted. It streams into
+the same bounded cache, without SDK caches or credential lookup. The SakuraTool
+producer format has an explicit metadata/TAR-JSON adapter; this does not establish
+full-release reader acceptance, GPU performance or model quality.
+See [selected dataset setup](../README.md#selected-sakuratool-dataset-modelscope).
 
 ## Cache ownership, capacity and termination
 

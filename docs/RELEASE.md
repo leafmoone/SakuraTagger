@@ -32,9 +32,11 @@ full 40-hex immutable commits; arbitrary non-main branches/tags are rejected.
 No credentials, URL guesses, network request or directory scanning is
 performed by this module. A remote revision must identify the immutable release
 the caller intends; remote downloading is a separate provider responsibility.
-The current concrete remote adapter supports public Hugging Face dataset commits.
-ModelScope remains explicitly unsupported until its producer-specific immutable
-transport is verified. See [TAR/cache interfaces](TAR_CACHE.md).
+Concrete remote adapters support public Hugging Face and ModelScope dataset commits.
+The explicit SakuraTool adapter preserves producer records while converting its
+manifest-listed indices and CSV vocabularies; reference fixtures remain unchanged.
+See [selected dataset setup](../README.md#selected-sakuratool-dataset-modelscope) and
+[TAR/cache interfaces](TAR_CACHE.md).
 
 Every shard must be an uncompressed `.tar`, at most **5,368,709,120 bytes (5 GiB)**
 including archive overhead. Unpublished and `.partial` paths are rejected.

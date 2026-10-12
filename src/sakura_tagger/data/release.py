@@ -171,7 +171,7 @@ class DatasetRelease:
         return None if path is None else SourceMembership.read(self.local_path(path), self.vocabulary)
 
 
-def reference_index_schema(vocabulary, release_id):
+def reference_index_schema(vocabulary, release_id, *, producer_format=None):
     """Physical sparse Parquet schema. uint64 values are TAR data offsets."""
     import pyarrow as pa
     fields = [(name, pa.string()) for name in (
@@ -187,6 +187,10 @@ def reference_index_schema(vocabulary, release_id):
     fields += [('source_provenance', pa.list_(pa.string())), ('single_artist_confirmed', pa.bool_()),
                ('artist_evidence', pa.list_(pa.struct([
                    ('source', pa.string()), ('domain', pa.string()), ('class_id', pa.int32()), ('label', pa.string())])))]
+    if producer_format is not None:
+        if producer_format != 'sakuratool-immutable-release-v1':
+            raise ValueError('Unsupported producer adapter')
+        fields += [('producer_record', pa.string()), ('artist_conflict', pa.bool_())]
     metadata = {b'schema_version': INDEX_VERSION.encode(), b'vocab_sha256': vocabulary.sha256.encode(),
                 b'release_id': release_id.encode()}
     return pa.schema(fields, metadata=metadata)
@@ -229,7 +233,9 @@ def single_artist_target(record, vocabulary, *, release_confirmed=False):
     # None inherits the Release assumption; an explicit sample-level False
     # overrides it, so contradictory evidence cannot silently enter CE/support.
     confirmed = release_confirmed if sample_confirmed is None else sample_confirmed
-    if len(claims) > 1:
+    if type(record.get('artist_conflict', False)) is not bool:
+        raise ValueError('Artist conflict must be explicit boolean evidence')
+    if len(claims) > 1 or record.get('artist_conflict', False):
         return ArtistTarget(-100, False, tuple(sorted(original)), True, 'conflict')
     if not claims:
         return ArtistTarget(-100, False, (), False, 'missing')
@@ -342,7 +348,8 @@ def build_local_index(release, output, *, batch_size=4096):
                 PRIMARY KEY(domain, class_id));
             CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         ''')
-        expected = reference_index_schema(release.vocabulary, release.identity['release_id'])
+        expected = reference_index_schema(release.vocabulary, release.identity['release_id'],
+                                          producer_format=release.document.get('producer_format'))
         for descriptor in release.indices:
             path = release.local_path(descriptor['path'])
             verify_artifact(path, descriptor)

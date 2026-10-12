@@ -104,6 +104,9 @@ def reference_sample_json(row, vocabulary, *, vocab_sha256=None):
 
 
 def validate_sample_json(metadata, row, release):
+    if release.document.get('producer_format') == 'sakuratool-immutable-release-v1':
+        from .sakuratool import validate_sample
+        return validate_sample(metadata, row, release)
     expected = reference_sample_json(row, release.vocabulary, vocab_sha256=release.identity['vocab_sha256'])
     if not isinstance(metadata, dict) or any(metadata.get(key) != value for key, value in expected.items()):
         raise ValueError('Reference TAR JSON and frozen index/Vocabulary disagree')

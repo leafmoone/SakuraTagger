@@ -1,0 +1,19 @@
+# Selected training dataset; prepare-dataset downloads metadata only.
+# Advancing the producer revision/release is an explicit configuration change.
+extends: baseline.yaml
+dataset:
+  repository: leafmoone/SakuraTool-dataset
+  revision: 1eb4ebd70f203bf465338fec1a4cb2aca6234ea1
+  manifest: metadata/releases/v1-eligible-near5GiB-000002/release_manifest.json
+  output: data/sakuratool-v1-eligible-near5GiB-000002
+runtime:
+  release: data/sakuratool-v1-eligible-near5GiB-000002/release.json
+  index: data/sakuratool-v1-eligible-near5GiB-000002/index.sqlite
+cache:
+  job_id: sakuratool_v1_eligible_000002
+  workers: 1
+  prefetch_count: 1
+sampling:
+  assets: cache/sakuratool-v1-eligible-near5GiB-000002/sampling
+# Training endpoints remain null. Official weights and machine budgets must be
+# supplied explicitly; val/test are only 8 samples each, not quality acceptance.

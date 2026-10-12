@@ -315,12 +315,21 @@ def run_command(args):
     _write(run_dir / f'resolved-rank-{rank}.json', context)
     torch.manual_seed(config.get('seed', 0))
     started = time.perf_counter()
-    if args.command in ('inspect', 'preflight'):
+    if args.command == 'prepare-dataset':
+        from .data.sakuratool import prepare_release
+        source = config.get('dataset', {})
+        release = prepare_release(source['repository'], source['revision'], source['manifest'],
+                                  source['output'])
+        result = {'release': str(release.root / 'release.json'), 'identity': release.identity,
+                  'samples': release.document['producer_sample_counts'], 'images_read': 0,
+                  'formal_training': 'NOT_STARTED'}
+    elif args.command in ('inspect', 'preflight'):
         release = DatasetRelease.read(_runtime(config, 'release'))
         from .data.release import reference_index_schema
         import pyarrow.parquet as pq
         schemas = []
-        expected_schema = reference_index_schema(release.vocabulary, release.document['release_id'])
+        expected_schema = reference_index_schema(release.vocabulary, release.document['release_id'],
+                                               producer_format=release.document.get('producer_format'))
         for item in release.document['indices']:
             schema = pq.read_schema(release.local_path(item['path']))
             if (not schema.equals(expected_schema, check_metadata=False)
@@ -418,7 +427,7 @@ def run_command(args):
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest='command', required=True)
-    for name in ('inspect', 'preflight', 'build-local-index', 'train', 'evaluate', 'calibrate', 'predict', 'export', 'selfcheck', 'benchmark'):
+    for name in ('prepare-dataset', 'inspect', 'preflight', 'build-local-index', 'train', 'evaluate', 'calibrate', 'predict', 'export', 'selfcheck', 'benchmark'):
         command = commands.add_parser(name)
         command.add_argument('--config', type=Path)
         command.add_argument('--run-dir', type=Path)
