@@ -124,7 +124,7 @@ class WindowTrainer:
         self.world_size = dist.get_world_size() if self.distributed else 1
         if scope.identity['release'] != release.identity:
             raise ValueError('Loss scope belongs to a different Release')
-        release.vocabulary.validate_layout(model.layout)
+        model.bind_vocabulary(release.vocabulary)
         expected_artist = {entry['class_id']: entry['name'] for entry in release.vocabulary.document['original_artist']}
         if expected_artist != model.backbone.legacy.class_mapping:
             raise ValueError('Original Artist mapping differs from the bound Vocabulary')
