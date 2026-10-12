@@ -102,6 +102,8 @@ class DatasetRelease:
             for key in ('repository', 'revision'):
                 if not isinstance(source.get(key), str) or not source[key] or source[key] in ('main', 'master', 'latest'):
                     raise ValueError('Remote sources require explicit fixed repository/revision identity')
+            if source['provider'] in ('huggingface', 'modelscope') and not re.fullmatch('[0-9a-f]{40}', source['revision']):
+                raise ValueError('Remote dataset revisions must be full immutable 40-hex commits, not branch/tag names')
         inventories = {}
         for group, suffix in (('shards', '.tar'), ('indices', '.parquet')):
             values = document.get(group)

@@ -48,3 +48,18 @@ sparse_loss:
     general: {mode: sampled_weak_negative, lambda_u: 1.0, lambda_n: 1.0, sample_size: 2048, chunk_size: 4096}
     character: {mode: sampled_weak_negative, lambda_u: 1.0, lambda_n: 1.0, sample_size: 2048, chunk_size: 4096}
     copyright: {mode: sampled_weak_negative, lambda_u: 1.0, lambda_n: 1.0, sample_size: 2048, chunk_size: 4096}
+
+# Example only; size/time budgets are configurable for the chosen machine.
+cache:
+  root: cache/shards
+  job_id: reference_run
+  capacity_bytes: 10737418240  # 10 GiB, not a required machine size
+  high_watermark: 0.9
+  low_watermark: 0.7
+  prefetch_count: 2
+  workers: 2
+  wait_timeout: 120.0
+  transfer_timeout: 3600.0
+  read_timeout: 30.0
+  retries: 1
+  max_member_bytes: 134217728

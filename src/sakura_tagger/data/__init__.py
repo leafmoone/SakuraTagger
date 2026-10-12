@@ -20,3 +20,12 @@ from .release import (DatasetRelease, SparseReleaseIndex, build_local_index,
 
 __all__ += ['DatasetRelease', 'SparseReleaseIndex', 'build_local_index',
             'reference_index_schema', 'single_artist_target', 'collate_artist_targets']
+
+from .shard_cache import (ShardCache, LocalShardProvider, LoopbackShardProvider,
+                          HuggingFaceShardProvider, provider_for_release, CacheBackpressure)
+from .tar_dataset import (TarReader, TarDataset, DimensionCorrections, collate_prepared,
+                          rebucket_prepared, decoder_capabilities)
+
+__all__ += ['ShardCache', 'LocalShardProvider', 'LoopbackShardProvider', 'HuggingFaceShardProvider',
+            'provider_for_release', 'CacheBackpressure', 'TarReader', 'TarDataset',
+            'DimensionCorrections', 'collate_prepared', 'rebucket_prepared', 'decoder_capabilities']

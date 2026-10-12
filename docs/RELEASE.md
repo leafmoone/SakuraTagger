@@ -27,10 +27,14 @@ never substitute for it. The five ID spaces remain separate and unchanged.
 Other Artist names must exclude exact Original Artist names.
 
 `source` names `provider: local`, or an explicit `modelscope`, `huggingface` or
-`loopback` repository and fixed revision. Mutable main/master/latest aliases are
-rejected. No credentials, URL guesses, network request or directory scanning is
+`loopback` repository and fixed revision. Production remote revisions require
+full 40-hex immutable commits; arbitrary non-main branches/tags are rejected.
+No credentials, URL guesses, network request or directory scanning is
 performed by this module. A remote revision must identify the immutable release
 the caller intends; remote downloading is a separate provider responsibility.
+The current concrete remote adapter supports public Hugging Face dataset commits.
+ModelScope remains explicitly unsupported until its producer-specific immutable
+transport is verified. See [TAR/cache interfaces](TAR_CACHE.md).
 
 Every shard must be an uncompressed `.tar`, at most **5,368,709,120 bytes (5 GiB)**
 including archive overhead. Unpublished and `.partial` paths are rejected.
