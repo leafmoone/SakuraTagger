@@ -566,7 +566,7 @@ def check_real_weights(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=('all', 'architecture', 'source', 'release', 'positive_unknown', 'tar', 'sampling', 'window_trainer', 'checkpoint', 'ddp'), default='all')
+    parser.add_argument('--suite', choices=('all', 'architecture', 'source', 'release', 'positive_unknown', 'tar', 'sampling', 'window_trainer', 'checkpoint', 'evaluation', 'ddp'), default='all')
     parser.add_argument('--real-model-dir', default=None, help='Optional existing official Kaloscope package directory; never downloads')
     args = parser.parse_args()
     torch.set_num_threads(1)
@@ -574,6 +574,10 @@ def main():
     from .selfcheck_release import check_release
     from .selfcheck_positive_unknown import check_positive_unknown
     if args.suite != 'all':
+        if args.suite == 'evaluation':
+            from .selfcheck_evaluation import check_evaluation
+            print(json.dumps(check_evaluation(), indent=2))
+            return
         if args.suite == 'checkpoint':
             from .selfcheck_checkpoint import check_checkpoint
             print(json.dumps(check_checkpoint(), indent=2))
@@ -598,6 +602,7 @@ def main():
     from .selfcheck_sampling import check_sampling
     from .selfcheck_ddp import check_ddp, check_window_trainer
     from .selfcheck_checkpoint import check_checkpoint
+    from .selfcheck_evaluation import check_evaluation
     print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'losses': check_losses(),
                       'training': check_training(), 'source_membership': check_source_membership(),
                       'architecture': check_architecture(),
@@ -607,6 +612,7 @@ def main():
                       'sampling': check_sampling(),
                       'window_trainer': check_window_trainer(),
                       'checkpoint': check_checkpoint(),
+                      'evaluation': check_evaluation(),
                       'ddp': check_ddp(),
                       'candidate_production_heads': production_head_counts(),
                       'identity_local_production_heads': production_head_counts('global_local'),

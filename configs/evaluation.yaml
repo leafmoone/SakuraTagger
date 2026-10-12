@@ -1,0 +1,28 @@
+# Fixed-cohort CPU engineering example; no automatic evaluation or quality claim.
+# E9's CLI resolves these paths; all IDs and identities must be supplied explicitly.
+cohort:
+  split: val
+  sample_ids_file: null
+  # null class_ids means the complete Vocabulary scope, subject to budget refusal.
+  class_ids: null
+  source_filter: null
+feature_cache:
+  checkpoint_id: null
+  path: cache/evaluation/features
+  spool_dir: cache/evaluation/spool
+evaluation:
+  protocol: observed_label_proxy  # or verified_scope with actual P/N evidence
+  min_positives: 1
+  min_negatives: 1
+  recall_threshold: 0.5
+  max_samples: 2048
+  class_block: 256
+  row_batch: 64
+  ram_bytes: 536870912
+  disk_bytes: 2147483648
+calibration:
+  min_class_positives: 20
+  min_class_negatives: 20
+selection:
+  primary: general.macro_ap
+  minimums: {}  # REPORT_ONLY until actual quality and old-feature gates are set
