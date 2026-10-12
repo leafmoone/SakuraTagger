@@ -564,66 +564,55 @@ def check_real_weights(path):
             'note': 'CPU strict load/output parity only; accuracy and GPU performance unverified'}
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=('all', 'architecture', 'source', 'release', 'positive_unknown', 'tar', 'sampling', 'window_trainer', 'checkpoint', 'evaluation', 'deployment', 'ddp'), default='all')
-    parser.add_argument('--real-model-dir', default=None, help='Optional existing official Kaloscope package directory; never downloads')
-    args = parser.parse_args()
+def run_selfcheck(suite='all', *, real_model_dir=None, skip_ddp_reason=None):
+    """Explicit skips remain NOT_VERIFIED; actual test failures are never masked."""
+    if skip_ddp_reason is not None and (not isinstance(skip_ddp_reason, str) or not skip_ddp_reason.strip()):
+        raise ValueError('DDP skip requires a nonempty explicit environmental reason')
     torch.set_num_threads(1)
     from .selfcheck_architecture import check_architecture
     from .selfcheck_release import check_release
     from .selfcheck_positive_unknown import check_positive_unknown
-    if args.suite != 'all':
-        if args.suite == 'deployment':
-            from .selfcheck_deployment import check_deployment
-            print(json.dumps(check_deployment(), indent=2))
-            return
-        if args.suite == 'evaluation':
-            from .selfcheck_evaluation import check_evaluation
-            print(json.dumps(check_evaluation(), indent=2))
-            return
-        if args.suite == 'checkpoint':
-            from .selfcheck_checkpoint import check_checkpoint
-            print(json.dumps(check_checkpoint(), indent=2))
-            return
-        if args.suite in ('window_trainer', 'ddp'):
-            from .selfcheck_ddp import check_ddp, check_window_trainer
-            print(json.dumps(check_ddp() if args.suite == 'ddp' else check_window_trainer(), indent=2))
-            return
-        if args.suite == 'sampling':
-            from .selfcheck_sampling import check_sampling
-            print(json.dumps(check_sampling(), indent=2))
-            return
-        if args.suite == 'tar':
-            from .selfcheck_tar import check_tar
-            print(json.dumps(check_tar(), indent=2))
-            return
-        suite = {'architecture': check_architecture, 'source': check_source_membership,
-                 'release': check_release, 'positive_unknown': check_positive_unknown}[args.suite]
-        print(json.dumps(suite(), indent=2))
-        return
     from .selfcheck_tar import check_tar
     from .selfcheck_sampling import check_sampling
     from .selfcheck_ddp import check_ddp, check_window_trainer
     from .selfcheck_checkpoint import check_checkpoint
     from .selfcheck_evaluation import check_evaluation
     from .selfcheck_deployment import check_deployment
-    print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'losses': check_losses(),
-                      'training': check_training(), 'source_membership': check_source_membership(),
-                      'architecture': check_architecture(),
-                      'release': check_release(),
-                      'positive_unknown': check_positive_unknown(),
-                      'tar': check_tar(),
-                      'sampling': check_sampling(),
-                      'window_trainer': check_window_trainer(),
-                      'checkpoint': check_checkpoint(),
-                      'evaluation': check_evaluation(),
-                      'deployment': check_deployment(),
-                      'ddp': check_ddp(),
-                      'candidate_production_heads': production_head_counts(),
-                      'identity_local_production_heads': production_head_counts('global_local'),
-                      'real_weights': check_real_weights(args.real_model_dir) if args.real_model_dir else 'NOT_VERIFIED',
-                      'CUDA': 'NOT_RUN', 'formal_training': 'NOT_RUN'}, indent=2))
+    from .selfcheck_integration import check_integration
+    def ddp():
+        return ({'status': 'NOT_VERIFIED', 'reason': skip_ddp_reason, 'attempted': False}
+                if skip_ddp_reason is not None else check_ddp())
+    suites = {'architecture': check_architecture, 'source': check_source_membership,
+              'release': check_release, 'positive_unknown': check_positive_unknown,
+              'tar': check_tar, 'sampling': check_sampling, 'window_trainer': check_window_trainer,
+              'checkpoint': check_checkpoint, 'evaluation': check_evaluation, 'deployment': check_deployment,
+              'integration': check_integration, 'ddp': ddp}
+    if suite != 'all':
+        if suite not in suites:
+            raise ValueError('Unknown selfcheck suite: ' + suite)
+        return suites[suite]()
+    result = {'synthetic_cpu': check_model(), 'data': check_data(), 'losses': check_losses(), 'training': check_training()}
+    result.update({name: check() for name, check in suites.items()})
+    result.update(candidate_production_heads=production_head_counts(),
+                  identity_local_production_heads=production_head_counts('global_local'),
+                  real_weights=check_real_weights(real_model_dir) if real_model_dir else 'NOT_VERIFIED',
+                  CUDA='NOT_VERIFIED', formal_training='NOT_STARTED')
+    result['acceptance'] = {'AVAILABLE_CPU_SUITES': 'PASS', 'CPU_SINGLE_PROCESS_E2E': 'PASS',
+                            'CPU_DDP_PASS': 'NOT_VERIFIED' if skip_ddp_reason is not None else 'PASS',
+                            'CPU_E2E_PASS': 'NOT_VERIFIED_DDP_REQUIRED' if skip_ddp_reason is not None else 'PASS',
+                            'CODE_COMPLETE': 'VERIFICATION_INCOMPLETE' if skip_ddp_reason is not None else 'PASS',
+                            'REAL_HANDOFF': 'NOT_VERIFIED', 'GPU': 'NOT_VERIFIED', 'FORMAL_TRAINING': 'NOT_STARTED'}
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--suite', default='all')
+    parser.add_argument('--real-model-dir', help='Existing official Kaloscope package only; never downloads')
+    parser.add_argument('--skip-ddp-reason', help='Explicit environmental NOT_VERIFIED skip; never an automatic fallback')
+    args = parser.parse_args()
+    print(json.dumps(run_selfcheck(args.suite, real_model_dir=args.real_model_dir,
+                                  skip_ddp_reason=args.skip_ddp_reason), indent=2))
 
 
 if __name__ == '__main__':

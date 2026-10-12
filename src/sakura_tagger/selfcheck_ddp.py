@@ -30,7 +30,7 @@ from .training import (WindowTrainer, WindowTrainerConfig, WeakNegativeConfig, S
                        WeakNegativeScope, initialize_distributed, CoordinatedTrainingError)
 
 
-def training_fixture(root):
+def training_fixture(root, *, splits=None, build_assets=True):
     root = Path(root)
     release = tiny_tar_release(root, count=9)
     rows = pq.read_table(root / 'index.parquet').to_pylist()
@@ -39,6 +39,8 @@ def training_fixture(root):
         for i, row in enumerate(rows):
             with tarfile.open(root / row['file_path'], 'r:') as source:
                 body = source.extractfile(row['image_member']).read()
+            if splits is not None:
+                row['split'] = splits[i]
             row.update(general_ids=[i % 3] if i % 2 == 0 else [], character_ids=[1] if i == 1 else [],
                        copyright_ids=[0] if i == 6 else [], general_negative_ids=[1] if i == 7 else [],
                        other_artist_ids=[] if i in (0, 2) else [1, 2] if i == 1 else [i % 3],
@@ -54,10 +56,11 @@ def training_fixture(root):
     document['indices'] = [{**artifact_descriptor(root / 'index.parquet', root), 'status': 'published'}]
     (root / 'release.json').write_text(json.dumps(document))
     release = DatasetRelease.read(root / 'release.json')
-    index = build_local_index(release, root.parent / 'index.sqlite')
-    build_sampling_assets(index, root.parent / 'assets')
-    DimensionCorrections(root.parent / 'dimensions.sqlite', release).close()
-    index.close()
+    if build_assets:
+        index = build_local_index(release, root.parent / 'index.sqlite')
+        build_sampling_assets(index, root.parent / 'assets')
+        DimensionCorrections(root.parent / 'dimensions.sqlite', release).close()
+        index.close()
     return release
 
 
@@ -164,8 +167,10 @@ def _worker(root):
         cache.close()
         from .selfcheck_checkpoint import check_distributed_checkpoint
         checkpoint_result = check_distributed_checkpoint(root)
+        from .selfcheck_integration import check_distributed_pipeline
+        pipeline_result = check_distributed_pipeline(Path(root) / 'pipeline')
         (Path(root) / f'worker{rank}.json').write_text(json.dumps({'rank': rank, 'data_failure': 'PASS',
-            'nonfinite_skip_then_update': 'PASS', 'stage_DDP_rebuild': 'PASS', 'sampler_signature_mismatch': 'PASS', 'checkpoint_resume': checkpoint_result}))
+            'nonfinite_skip_then_update': 'PASS', 'stage_DDP_rebuild': 'PASS', 'sampler_signature_mismatch': 'PASS', 'checkpoint_resume': checkpoint_result, 'integrated_pipeline': pipeline_result}))
     finally:
         dist.destroy_process_group()
 
@@ -400,7 +405,7 @@ def check_ddp():
                 'empty_gradient_no_AdamW_decay_finite_end': 'PASS',
                 'legacy_exact_unequal_mask_short_tail_error': legacy_error,
                 'legacy_committed_cursor_and_normalization_identity': 'PASS',
-                'CPU_BF16_independent_teacher': 'PASS', 'same_world_checkpoint_resume': 'PASS', 'CUDA_NCCL_FP16': 'NOT_VERIFIED',
+                'CPU_BF16_independent_teacher': 'PASS', 'same_world_checkpoint_resume': 'PASS', 'distributed_Release_to_predict_pipeline': 'PASS', 'CUDA_NCCL_FP16': 'NOT_VERIFIED',
                 'default_worker_tensor_FD_IPC': 'NOT_VERIFIED'}
 
 

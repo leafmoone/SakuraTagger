@@ -41,6 +41,22 @@ check verifies strict CPU loading and output parity, not real-data accuracy or
 GPU performance. Generated checkpoints, data, temporary tests and logs are Git
 ignored. The durable acceptance entry above is part of the supported program.
 
+## Explicit CLI and pretraining engineering
+
+The unified entry is `python -m sakura_tagger` (`sakura-tagger` after editable
+installation). It provides inspect/preflight, build-local-index, explicit train,
+evaluate, calibrate, export, predict, selfcheck and staged synthetic benchmark.
+See [actual commands and portable T1/T2 configuration](docs/CLI.md),
+[whole-window training](docs/WINDOW_TRAINING.md),
+[complete checkpoints](docs/WINDOW_CHECKPOINTS.md),
+[fixed-cohort AP/calibration](docs/EVALUATION.md) and
+[strict inference packages](docs/DEPLOYMENT.md).
+
+Training defaults have no endpoint and refuse to run. No formal training, real
+weight download or CUDA run is part of these engineering selfchecks. An explicit
+reasoned DDP skip records `NOT_VERIFIED` and leaves full required verification
+incomplete; it is never reported as actual CPU_DDP_PASS.
+
 ## Original Kaloscope compatibility
 
 Place `model.safetensors`, `config.json`, and `class_mapping.csv` from the

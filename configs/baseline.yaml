@@ -80,3 +80,23 @@ window_trainer:
   max_epochs: null
   max_attempted_windows: null
   preservation: {global_features: 0.0, style_embedding: 0.0, artist_logits: 0.0}
+
+# Shared CLI paths; pass flags or replace null with ${ENVIRONMENT_VARIABLE}.
+# Relative runtime/cache paths resolve from the command's working directory.
+runtime:
+  release: null
+  index: null
+  model_dir: null
+  checkpoint: null
+  initialize_from: null
+  calibration: null
+  package: null
+  run_dir: null
+  device: cpu
+  distributed_timeout_seconds: 600  # Includes bounded checkpoint/evaluation waits.
+preprocessing:
+  bucket: {target_pixels: 262144, max_pixels: 278528, max_side: 2048, alignment: 16, preferred_error: 0.01, max_error: 0.02}
+  alpha_background: [255, 255, 255]
+run:
+  checkpoint_every_updates: null
+  evaluate_every_updates: null

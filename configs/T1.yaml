@@ -1,0 +1,4 @@
+# Explicit T1 starting point. Null endpoint still refuses train().
+extends: baseline.yaml
+window_trainer:
+  stage: T1

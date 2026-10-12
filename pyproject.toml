@@ -9,6 +9,9 @@ description = "Single-backbone Kaloscope multi-task tagging"
 requires-python = ">=3.11"
 dependencies = ["torch>=2.5", "safetensors>=0.4", "numpy>=1.26", "Pillow>=10", "PyYAML>=6"]
 
+[project.scripts]
+sakura-tagger = "sakura_tagger.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8"]
 parquet = ["pyarrow>=14"]

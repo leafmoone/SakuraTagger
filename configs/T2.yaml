@@ -1,0 +1,5 @@
+# Explicit new T2 phase; do not silently resume a T1 checkpoint as T2.
+extends: baseline.yaml
+window_trainer:
+  stage: T2
+  learning_rates: {backbone_last4: 0.00001, general: 0.0001, identity: 0.0001, other_artist: 0.0001}

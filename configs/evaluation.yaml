@@ -1,5 +1,6 @@
 # Fixed-cohort CPU engineering example; no automatic evaluation or quality claim.
-# E9's CLI resolves these paths; all IDs and identities must be supplied explicitly.
+# The unified CLI resolves these paths; cohort IDs must be supplied explicitly.
+extends: baseline.yaml
 cohort:
   split: val
   sample_ids_file: null
@@ -7,9 +8,8 @@ cohort:
   class_ids: null
   source_filter: null
 feature_cache:
-  checkpoint_id: null
-  path: cache/evaluation/features
-  spool_dir: cache/evaluation/spool
+  path: null  # Defaults to the current run directory; avoids cross-checkpoint reuse
+  spool_dir: null
 evaluation:
   protocol: observed_label_proxy  # or verified_scope with actual P/N evidence
   min_positives: 1
