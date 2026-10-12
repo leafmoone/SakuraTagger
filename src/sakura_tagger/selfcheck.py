@@ -554,18 +554,21 @@ def check_real_weights(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=('all', 'architecture', 'source'), default='all')
+    parser.add_argument('--suite', choices=('all', 'architecture', 'source', 'release'), default='all')
     parser.add_argument('--real-model-dir', default=None, help='Optional existing official Kaloscope package directory; never downloads')
     args = parser.parse_args()
     torch.set_num_threads(1)
     from .selfcheck_architecture import check_architecture
+    from .selfcheck_release import check_release
     if args.suite != 'all':
-        suite = check_architecture if args.suite == 'architecture' else check_source_membership
+        suite = {'architecture': check_architecture, 'source': check_source_membership,
+                 'release': check_release}[args.suite]
         print(json.dumps(suite(), indent=2))
         return
     print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'losses': check_losses(),
                       'training': check_training(), 'source_membership': check_source_membership(),
                       'architecture': check_architecture(),
+                      'release': check_release(),
                       'candidate_production_heads': production_head_counts(),
                       'identity_local_production_heads': production_head_counts('global_local'),
                       'real_weights': check_real_weights(args.real_model_dir) if args.real_model_dir else 'NOT_VERIFIED',

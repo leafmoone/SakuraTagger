@@ -23,6 +23,9 @@ The tested CPU dependency versions are pinned in `requirements-cpu.lock`:
 `python -m pip install -r requirements-cpu.lock`, then
 `python -m pip install --no-deps -e .`. This includes PyArrow and the scikit-learn
 metric reference. It is a CPU environment lock, not a CUDA installation recipe.
+The complete pretraining selfcheck needs this pinned environment; the focused
+legacy/source suites remain available independently. See [the reference Release
+contract](docs/RELEASE.md) for sparse Parquet and trusted artist conversion.
 
 Selfcheck uses a tiny, random **12-block upstream DINOv3** with small class counts.
 It performs synthetic CPU forwards/backwards and optimizer/checkpoint checks,

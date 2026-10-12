@@ -14,3 +14,9 @@ __all__ += ['SCHEMA_VERSION', 'Vocabulary', 'ManifestDataset', 'encode_supervisi
 from .source_membership import SourceMembership, SOURCE_MEMBERSHIP_VERSION
 
 __all__ += ['SourceMembership', 'SOURCE_MEMBERSHIP_VERSION']
+
+from .release import (DatasetRelease, SparseReleaseIndex, build_local_index,
+                      reference_index_schema, single_artist_target, collate_artist_targets)
+
+__all__ += ['DatasetRelease', 'SparseReleaseIndex', 'build_local_index',
+            'reference_index_schema', 'single_artist_target', 'collate_artist_targets']
