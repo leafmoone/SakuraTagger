@@ -28,3 +28,15 @@ trainer:
   accumulation_steps: 1
   amp: 'off'
   gradient_clip: 1.0
+
+# Engineering examples only: lambda/K have not been tuned on real data.
+sparse_loss:
+  other_artist_mode: single_label
+  weak_negative_scope: domain
+  source_filter: []
+  seed: 0
+  weights: {general: 1.0, character: 1.0, copyright: 1.0, other_artist: 1.0}
+  domains:
+    general: {mode: sampled_weak_negative, lambda_u: 1.0, lambda_n: 1.0, sample_size: 2048, chunk_size: 4096}
+    character: {mode: sampled_weak_negative, lambda_u: 1.0, lambda_n: 1.0, sample_size: 2048, chunk_size: 4096}
+    copyright: {mode: sampled_weak_negative, lambda_u: 1.0, lambda_n: 1.0, sample_size: 2048, chunk_size: 4096}

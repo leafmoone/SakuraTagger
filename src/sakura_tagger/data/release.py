@@ -129,6 +129,9 @@ class DatasetRelease:
         self.root = Path(root).resolve()
         self.vocabulary = Vocabulary(json.loads(json.dumps(vocabulary.document)))
         self.sha256 = _sha(document)
+        self._identity = {'release_schema': RELEASE_VERSION, 'dataset_id': document['dataset_id'],
+                          'release_id': document['release_id'], 'release_sha256': self.sha256,
+                          'vocab_sha256': document['vocab_sha256']}
         self.shards = MappingProxyType({item['shard_id']: item for item in inventories['shards']})
         self.indices = inventories['indices']
         self.source = MappingProxyType(source)
@@ -152,9 +155,7 @@ class DatasetRelease:
 
     @property
     def identity(self):
-        return {'release_schema': RELEASE_VERSION, 'dataset_id': self._document['dataset_id'],
-                'release_id': self._document['release_id'], 'release_sha256': self.sha256,
-                'vocab_sha256': self.vocabulary.sha256}
+        return dict(self._identity)
 
     def local_path(self, path):
         result = (self.root / relative_path(path)).resolve()
