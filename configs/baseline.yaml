@@ -64,3 +64,19 @@ sampling:
   num_workers: 0
   worker_transport: shared_memory  # numpy uses ordinary pipes if tensor-FD IPC is unavailable
   worker_timeout: 60.0
+
+# Formal explicit-window trainer. Null limits deliberately prevent run().
+window_trainer:
+  stage: T1
+  learning_rates: {backbone_last4: 0.00001, general: 0.0001, identity: 0.0001, other_artist: 0.0001}
+  weight_decay: 0.01
+  accumulation_steps: 4
+  amp: 'off'
+  gradient_clip: 1.0
+  warmup_updates: 100
+  schedule_updates: 10000
+  minimum_lr_ratio: 0.0
+  max_optimizer_steps: null
+  max_epochs: null
+  max_attempted_windows: null
+  preservation: {global_features: 0.0, style_embedding: 0.0, artist_logits: 0.0}

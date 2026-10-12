@@ -13,3 +13,9 @@ from .positive_unknown import (WeakNegativeConfig, SparseLossConfig, SamplingKey
 __all__ += ['WeakNegativeConfig', 'SparseLossConfig', 'SamplingKey', 'WeakNegativeScope',
             'DomainLoss', 'SparseLossResult', 'positive_unknown_loss', 'sparse_multitask_loss',
             'sparse_valid_counts']
+
+from .window_trainer import (WindowTrainer, WindowTrainerConfig, UpdateSchedule,
+                             initialize_distributed, CoordinatedTrainingError)
+
+__all__ += ['WindowTrainer', 'WindowTrainerConfig', 'UpdateSchedule',
+            'initialize_distributed', 'CoordinatedTrainingError']

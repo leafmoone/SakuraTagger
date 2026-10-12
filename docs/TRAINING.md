@@ -39,10 +39,10 @@ and AMP (`off`, `bf16`, or CUDA-only `fp16`). CPU is default. `set_stage()` is
 allowed only at optimizer boundaries and rebuilds optimizer membership while
 preserving shared parameters' Adam state. New T2 backbone parameters are included.
 Do not build an optimizer once from only T1 parameters and silently reuse it for
-T2. The trainer is a single-process training API; the distributed sampler is an
-integration interface, not a claimed fully tested multi-GPU launch system.
-External DDP integrations must handle unequal rank lengths with join and align
-accumulation/optimizer boundaries. Distributed/GPU behavior is NOT_VERIFIED.
+T2. This legacy trainer is single-process. Formal sparse Release/DDP runs use
+`WindowTrainer`, documented in [WINDOW_TRAINING.md](WINDOW_TRAINING.md), with
+explicit control-only tails and coordinated counts, never DDP.join. GPU behavior
+remains NOT_VERIFIED.
 
 ## Batches and supervision
 
@@ -51,9 +51,24 @@ logical domains. All multi-label targets/masks are `[B,C]`, mask dtype bool.
 Every supplied target needs an explicit mask; absent domains are skipped.
 Unknown NaN targets are excluded before evaluating a loss. Observed targets must
 be finite binary values. Each logical loss divides by its observed element count,
-then applies its independent configured weight. Gradient accumulation averages
-microbatch losses, with a correctly rescaled final partial accumulation. It does
-not claim an element-weighted mean across unequal-supervision microbatches.
+then applies its independent configured weight. `train_window(batches)` and the
+default `train_epoch` pre-count the full window and compute an exact observed-entry
+mean even with unequal supervision or a short tail. Input batches are bounded by
+accumulation_steps; each graph is backpropagated immediately.
+
+`train_batch` deliberately retains the old immediate-backward, equal-microbatch
+objective because future supervision counts are unavailable. It is named
+`legacy_equal_microbatch`, not the formal objective. Normalization mode is saved
+in checkpoint settings, and an incompatible mode cannot silently resume. Older
+checkpoints without the field are identified as legacy equal-microbatch. Exact
+window checkpoints require `TrainerConfig(normalization="observed_entry_window")`
+when restoring. All epoch/default training routes use the exact window API.
+
+Sampler cursors advance only on completed attempted optimizer windows, including
+AMP/nonfinite skips. Empty exclusive modules get grad=None before AdamW, preventing
+weight decay from masquerading as learning. Empty updates do not increment the
+successful step count. Attempted/skipped/exposure counters are distinct. Stage
+changes update both model membership and configuration, rebuilding the optimizer.
 
 General `LossConfig.general_groups` can map semantic names to General IDs for
 separate detached loss statistics. These groups do not introduce physical heads.

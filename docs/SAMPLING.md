@@ -67,11 +67,11 @@ is useful where local tensor-FD IPC is unavailable; it changes neither values no
 logical cursor semantics. A loader-local seeded torch.Generator isolates iterator
 creation and worker base seeds from the model's global RNG. Worker waiting has a
 finite configurable timeout.
-The cloud acceptance environment permits TCP but rejects AF_UNIX creation with
-`PermissionError: [Errno 1] Operation not permitted`, even after execution was
-approved with sandbox escalation. Its two-worker prefetch/restart check therefore
-uses NumPy transport. **Default worker tensor-FD IPC is NOT_VERIFIED here.**
-Single-process tensor loading is checked. No security setting is changed.
+Some restricted runtimes lack the local socket capability required by PyTorch's
+default tensor-FD transport. The explicit NumPy mode uses ordinary permitted
+pipes instead; selecting it does not establish that shared-tensor transport works.
+Validate each worker/backend capability in the chosen runtime, report unsupported
+capabilities separately, and do not change security settings as a transport fix.
 
 ## Reports and limits
 

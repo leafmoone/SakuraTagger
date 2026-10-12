@@ -342,7 +342,7 @@ def _collate_numpy(samples):
 
 
 def window_loader(dataset, sampler, *, num_workers=0, prefetch_factor=2,
-                  worker_transport='shared_memory', worker_timeout=60.):
+                  worker_transport='shared_memory', worker_timeout=60., multiprocessing_context=None):
     """Yield (PlannedBatch, real collated batch or None), without acknowledgement.
 
     One loader lives for one prepared window. The consumer must acknowledge only
@@ -353,7 +353,8 @@ def window_loader(dataset, sampler, *, num_workers=0, prefetch_factor=2,
     sampler._require_plan()
     start = sampler.cursor
     batches = (list(batch.occurrences) for batch in sampler if not batch.control_only)
-    options = {'prefetch_factor': prefetch_factor, 'timeout': worker_timeout} if num_workers else {}
+    options = {'prefetch_factor': prefetch_factor, 'timeout': worker_timeout,
+               'multiprocessing_context': multiprocessing_context} if num_workers else {}
     # PyTorch consumes a base seed even with zero workers. Isolate it from the
     # model RNG so recreating a prefetched iterator cannot change the next update.
     generator = torch.Generator().manual_seed(int(_sha([sampler.seed, sampler.epoch, sampler.window, 'loader'])[:16], 16))

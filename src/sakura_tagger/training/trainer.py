@@ -1,7 +1,8 @@
 """Explicit T1/T2 engineering trainer; constructing it never starts training."""
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import math
+from itertools import islice
 import random
 
 import numpy as np
@@ -25,8 +26,11 @@ class TrainerConfig:
     gradient_clip: float | None = 1.0
     preservation: dict = field(default_factory=lambda: {'global_features': 0.0, 'style_embedding': 0.0, 'artist_logits': 0.0})
     identity_metric_weight: float = 0.0
+    normalization: str = 'legacy_equal_microbatch'
 
     def __post_init__(self):
+        if self.normalization not in ('legacy_equal_microbatch', 'observed_entry_window'):
+            raise ValueError('Unknown legacy normalization mode')
         if self.stage not in ('frozen_heads', 'finetune_last4', 'T1', 'T2'):
             raise ValueError('Unknown training stage')
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0 or not math.isfinite(self.weight_decay) or self.weight_decay < 0:
@@ -97,6 +101,9 @@ class Trainer:
         self.optimizer = self._new_optimizer()
         self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.config.amp == 'fp16')
         self.epoch, self.global_step, self.micro_step, self.pending = 0, 0, 0, 0
+        self.attempted_windows, self.skipped_updates, self.real_exposures = 0, 0, 0
+        self._pending_samplers, self._active = [], set()
+        self._pending_images = 0
 
     def _new_optimizer(self):
         return torch.optim.AdamW((parameter for parameter in self.model.parameters() if parameter.requires_grad),
@@ -113,6 +120,7 @@ class Trainer:
                 if parameter in old.state:
                     self.optimizer.state[parameter] = old.state[parameter]
         self.metadata['stage_config'] = {'stage': self.model.backbone.stage}
+        self.config = replace(self.config, stage=self.model.backbone.stage)
 
     def _autocast(self):
         if self.config.amp == 'off':
@@ -126,6 +134,18 @@ class Trainer:
                 {key: value.to(self.device) for key, value in batch['masks'].items()})
 
     def train_batch(self, batch, *, sampler=None):
+        """Legacy immediate-backward, equal-microbatch normalization only.
+
+        Future domain counts are unknown here. Formal/default epoch training uses
+        train_window for exact observed-entry denominators; sparse DDP uses
+        WindowTrainer's different, valid-image normalization.
+        """
+        if self.pending and self.config.normalization != 'legacy_equal_microbatch':
+            raise ValueError('Cannot change normalization within a window')
+        self.config = replace(self.config, normalization='legacy_equal_microbatch')
+        return self._train_batch(batch, sampler=sampler)
+
+    def _train_batch(self, batch, *, sampler=None, denominators=None, window_images=None, auto_flush=True):
         self.model.train()
         images, targets, masks = self._batch(batch)
         selection = set(targets)
@@ -137,7 +157,10 @@ class Trainer:
         with self._autocast():
             output = self.model(images, selection)
             losses = multitask_loss(output.logits, targets, self.loss_config, masks)
-            total = losses.total
+            total = losses.total if denominators is None else sum(
+                self.loss_config.weights.get(name, 1.) * loss * losses.valid_counts[name] / denominators[name]
+                if denominators.get(name, 0) else differentiable_zero(loss.reshape(1, 1))
+                for name, loss in losses.by_group.items())
             auxiliary = {}
             if self.teacher is not None:
                 self.teacher.eval()
@@ -149,7 +172,7 @@ class Trainer:
                         auxiliary[name] = F.mse_loss(getattr(output.features, name).float(), getattr(reference, name).float())
                 if weights.get('artist_logits', 0):
                     auxiliary['artist_logits'] = _chunked_artist_kd(output.features.artist_logits, reference.artist_logits, self.loss_config.chunk_size)
-                total = total + sum(weights[name] * value for name, value in auxiliary.items())
+                total = total + sum(weights[name] * value for name, value in auxiliary.items()) * (images.shape[0] / window_images if window_images else 1.)
             if self.config.identity_metric_weight:
                 if 'identity_relations' not in batch:
                     raise ValueError('Enabled identity metric requires caller-provided identity_relations')
@@ -158,54 +181,102 @@ class Trainer:
                 if metric.ndim != 0:
                     raise ValueError('Identity metric must return a scalar tensor')
                 auxiliary['identity_metric'] = metric
-                total = total + self.config.identity_metric_weight * metric
+                total = total + self.config.identity_metric_weight * metric * (images.shape[0] / window_images if window_images else 1.)
         if not torch.isfinite(total):
             raise FloatingPointError('Non-finite training loss')
-        self.scaler.scale(total / self.config.accumulation_steps).backward()
+        self.scaler.scale(total / self.config.accumulation_steps if denominators is None else total).backward()
+        self._active.update(name for name, count in losses.valid_counts.items()
+                            if count and self.loss_config.weights.get(name, 1.) > 0)
+        self._pending_images += images.shape[0]
         self.pending += 1
         self.micro_step += 1
         if sampler is not None:
-            sampler.advance()
-        if self.pending == self.config.accumulation_steps:
+            self._pending_samplers.append(sampler)
+        if auto_flush and self.pending == self.config.accumulation_steps:
             self.flush()
         return {'loss': float(total.detach()), 'by_group': {name: float(value.detach()) for name, value in losses.by_group.items()},
                 'valid_counts': losses.valid_counts, 'general_statistics': losses.general_statistics,
                 'auxiliary': {name: float(value.detach()) for name, value in auxiliary.items()}}
 
     def flush(self):
-        """Commit a full or final partial accumulation; checkpointing is now safe."""
+        """Commit a complete attempted window, including a finite/empty skip."""
         if not self.pending:
             return
         self.scaler.unscale_(self.optimizer)
         parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
-        if self.pending < self.config.accumulation_steps:
+        if self.config.normalization == 'legacy_equal_microbatch' and self.pending < self.config.accumulation_steps:
             for parameter in parameters:
                 if parameter.grad is not None:
                     parameter.grad.mul_(self.config.accumulation_steps / self.pending)
-        # One aggregate norm pass, never a Python/GPU synchronization per tensor.
-        # FP16 overflow was recorded by unscale_ and GradScaler will skip the step.
-        torch.nn.utils.clip_grad_norm_(
-            parameters, self.config.gradient_clip if self.config.gradient_clip is not None else float('inf'),
-            error_if_nonfinite=not self.scaler.is_enabled())
-        old_scale = self.scaler.get_scale()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        active = {'general': 'general' in self._active,
+                  'identity': bool({'character', 'copyright'} & self._active) or self.config.identity_metric_weight > 0,
+                  'other_artist': 'other_artist' in self._active,
+                  'backbone': bool(self._active) or any(self.config.preservation.values()) or self.config.identity_metric_weight > 0}
+        for name, enabled in active.items():
+            if not enabled:
+                for parameter in getattr(self.model, name).parameters():
+                    parameter.grad = None
+        parameters = [p for p in parameters if p.grad is not None]
+        norm = torch.nn.utils.clip_grad_norm_(parameters, self.config.gradient_clip or float('inf'), error_if_nonfinite=False)
+        finite = bool(torch.isfinite(norm))
+        success = bool(parameters) and finite
+        if success:
+            old_scale = self.scaler.get_scale()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            success = self.scaler.get_scale() >= old_scale
+        elif self.scaler.is_enabled():
+            scale = self.scaler.get_scale()
+            self.scaler.update(new_scale=scale * self.scaler.get_backoff_factor() if not finite else scale)
         self.optimizer.zero_grad(set_to_none=True)
-        self.pending = 0
-        if self.scaler.get_scale() >= old_scale:
-            self.global_step += 1
+        for sampler in self._pending_samplers:
+            sampler.advance()
+        self._pending_samplers.clear()
+        self._active.clear()
+        self.attempted_windows += 1
+        self.skipped_updates += int(not success)
+        self.real_exposures += self._pending_images
+        self._pending_images, self.pending = 0, 0
+        self.global_step += int(success)
+
+    def train_window(self, batches, *, sampler=None):
+        """Exact legacy observed-entry mean over a bounded full/short window.
+
+        Only input batches are retained. Each forward is immediately backpropagated;
+        this never retains the window's computation graphs or per-domain gradients.
+        """
+        if self.pending:
+            raise ValueError('Exact windows require an optimizer boundary')
+        batches = list(islice(batches, self.config.accumulation_steps + 1))
+        if not batches or len(batches) > self.config.accumulation_steps:
+            raise ValueError('Expected one nonempty bounded accumulation window')
+        counts = {name: sum(int(batch['masks'][name].sum()) for batch in batches if name in batch['targets'])
+                  for name in LOGICAL_DOMAINS}
+        images = sum(batch['images'].shape[0] for batch in batches)
+        self.config = replace(self.config, normalization='observed_entry_window')
+        results = [self._train_batch(batch, sampler=sampler, denominators=counts, window_images=images, auto_flush=False)
+                   for batch in batches]
+        self.flush()
+        return results
 
     def train_epoch(self, loader, *, sampler=None):
-        total, batches = 0.0, 0
+        total, batches, pending = 0.0, 0, []
         for batch in loader:
-            result = self.train_batch(batch, sampler=sampler)
-            total += result['loss']
-            batches += 1
-        self.flush()
+            pending.append(batch)
+            if len(pending) == self.config.accumulation_steps:
+                results = self.train_window(pending, sampler=sampler)
+                total += sum(result['loss'] for result in results)
+                batches += len(pending)
+                pending.clear()
+        if pending:
+            results = self.train_window(pending, sampler=sampler)
+            total += sum(result['loss'] for result in results)
+            batches += len(pending)
         self.epoch += 1
         if sampler is not None:
             sampler.set_epoch(self.epoch)
-        return {'batches': batches, 'mean_loss': total / batches if batches else 0.0}
+        return {'batches': batches, 'mean_loss': total / batches if batches else 0.0,
+                'normalization': 'observed_entry_window'}
 
     @torch.no_grad()
     def evaluate(self, loader):
@@ -250,7 +321,8 @@ class Trainer:
         payload = {'version': CHECKPOINT_VERSION, 'metadata': self.metadata, 'settings': self._settings(),
                    'model': self.model.state_dict(), 'optimizer': self.optimizer.state_dict(),
                    'scaler': self.scaler.state_dict(), 'epoch': self.epoch, 'global_step': self.global_step,
-                   'micro_step': self.micro_step, 'torch_rng': torch.get_rng_state(), 'python_rng': random.getstate(),
+                   'micro_step': self.micro_step, 'attempted_windows': self.attempted_windows,
+                   'skipped_updates': self.skipped_updates, 'real_exposures': self.real_exposures, 'torch_rng': torch.get_rng_state(), 'python_rng': random.getstate(),
                    'numpy_rng': (numpy_rng[0], numpy_rng[1].tolist(), numpy_rng[2], numpy_rng[3], numpy_rng[4]),
                    'sampler': sampler.state_dict() if sampler is not None else None,
                    'teacher': self.teacher.state_dict() if self.teacher is not None else None}
@@ -262,6 +334,9 @@ class Trainer:
         if self.pending:
             raise ValueError('Cannot load during partial accumulation')
         payload = read_payload(path, self.metadata)
+        # Historical checkpoints predate explicit normalization identity and
+        # always used the legacy equal-microbatch objective.
+        payload['settings']['trainer'].setdefault('normalization', 'legacy_equal_microbatch')
         if payload['settings'] != self._settings():
             raise ValueError('Checkpoint training/loss configuration mismatch')
         if (payload['sampler'] is None) != (sampler is None):
@@ -286,6 +361,9 @@ class Trainer:
         self.optimizer.load_state_dict(payload['optimizer'])
         self.scaler.load_state_dict(payload['scaler'])
         self.epoch, self.global_step, self.micro_step = payload['epoch'], payload['global_step'], payload['micro_step']
+        self.attempted_windows = payload.get('attempted_windows', self.global_step)
+        self.skipped_updates = payload.get('skipped_updates', 0)
+        self.real_exposures = payload.get('real_exposures', 0)
         if sampler is not None:
             sampler.load_state_dict(payload['sampler'])
         torch.set_rng_state(payload['torch_rng'])

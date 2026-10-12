@@ -133,6 +133,7 @@ class WeakNegativeScope:
 class DomainLoss:
     numerator: torch.Tensor
     valid_count: int
+    finite: torch.Tensor | None = None
 
     @property
     def mean(self):
@@ -200,7 +201,7 @@ def sample_unknown(ids, size, key, domain):
     return np.sort(generator.choice(ids, size=size, replace=False))
 
 
-def _softplus_mean(logits, ids, *, positive, chunk_size, recompute):
+def _softplus_mean(logits, ids, *, positive, chunk_size, recompute, finite_checks):
     result = differentiable_zero(logits)
     if not len(ids):
         return result
@@ -210,8 +211,7 @@ def _softplus_mean(logits, ids, *, positive, chunk_size, recompute):
         values = logits.index_select(0, selected)
         # Excluded/unknown sentinels never enter arithmetic. Nonfinite supervised
         # logits are a genuine training failure for the trainer to coordinate.
-        if not torch.isfinite(values).all():
-            raise ValueError('Nonfinite supervised/selected logits')
+        finite_checks.append(torch.isfinite(values).all())
         def term(part):
             return F.softplus(part.float() * sign).sum()
         value = checkpoint(term, values, use_reentrant=False) if recompute and values.requires_grad and torch.is_grad_enabled() else term(values)
@@ -219,20 +219,24 @@ def _softplus_mean(logits, ids, *, positive, chunk_size, recompute):
     return result / len(ids)
 
 
-def _row_terms(logits, positives, negatives, selected_unknown, config):
+def _row_terms(logits, positives, negatives, selected_unknown, config, finite_checks=None):
+    own_checks = finite_checks is None
+    finite_checks = [] if own_checks else finite_checks
     chunk = len(logits) if config.mode == 'full_reference' else config.chunk_size
-    value = _softplus_mean(logits, positives, positive=True, chunk_size=chunk, recompute=config.recompute)
+    value = _softplus_mean(logits, positives, positive=True, chunk_size=chunk, recompute=config.recompute, finite_checks=finite_checks)
     if config.lambda_n:
         value = value + config.lambda_n * _softplus_mean(logits, negatives, positive=False, chunk_size=chunk,
-                                                        recompute=config.recompute)
+                                                        recompute=config.recompute, finite_checks=finite_checks)
     if config.lambda_u and len(positives):
         value = value + config.lambda_u * _softplus_mean(logits, selected_unknown, positive=False, chunk_size=chunk,
-                                                        recompute=config.recompute)
+                                                        recompute=config.recompute, finite_checks=finite_checks)
+    if own_checks and finite_checks and not torch.stack(finite_checks).all():
+        raise ValueError('Nonfinite supervised/selected logits')
     return value
 
 
 def positive_unknown_loss(logits, positives, *, negatives=None, forbidden=None, allowed_ids,
-                          config, keys=None, domain='general'):
+                          config, keys=None, domain='general', defer_finite_check=False):
     """Sum per-image P/N/U means plus valid-image count for DDP composition."""
     if logits.ndim != 2 or len(positives) != len(logits):
         raise ValueError('Sparse loss requires [B,C] logits and one sparse row per image')
@@ -243,7 +247,7 @@ def positive_unknown_loss(logits, positives, *, negatives=None, forbidden=None, 
     if config.mode == 'sampled_weak_negative' and (keys is None or len(keys) != len(logits)):
         raise ValueError('Sampled loss needs stable sample/epoch/occurrence keys')
     allowed = _validate_allowed_ids(allowed_ids, logits.shape[-1])
-    numerator, count = differentiable_zero(logits), 0
+    numerator, count, finite_checks = differentiable_zero(logits), 0, []
     for row, (p, n, blocked) in enumerate(zip(positives, negatives, forbidden)):
         p, n, blocked = _validate_sparse_ids(p, n, blocked, logits.shape[-1])
         valid = bool(p) or bool(n) and (config.mode == 'masked_asl' or config.lambda_n > 0)
@@ -254,6 +258,7 @@ def positive_unknown_loss(logits, positives, *, negatives=None, forbidden=None, 
             known = torch.tensor(list(p) + list(n), dtype=torch.long, device=logits.device)
             target = torch.tensor([1.] * len(p) + [0.] * len(n), device=logits.device).unsqueeze(0)
             prediction = logits[row].index_select(0, known).unsqueeze(0)
+            finite_checks.append(torch.isfinite(prediction).all())
             value, _ = masked_asymmetric_loss(prediction, target, torch.ones_like(target, dtype=torch.bool),
                                                config=LossConfig(chunk_size=config.chunk_size, recompute=config.recompute))
         else:
@@ -262,9 +267,12 @@ def positive_unknown_loss(logits, positives, *, negatives=None, forbidden=None, 
                 selected = _eligible_unknown(p, n, blocked, allowed)
                 if config.mode == 'sampled_weak_negative':
                     selected = sample_unknown(selected, config.sample_size, keys[row], domain)
-            value = _row_terms(logits[row], p, n, selected, config)
+            value = _row_terms(logits[row], p, n, selected, config, finite_checks)
         numerator = numerator + value
-    return DomainLoss(numerator, count)
+    finite = torch.stack(finite_checks).all() if finite_checks else torch.ones((), dtype=torch.bool, device=logits.device)
+    if not defer_finite_check and not finite:
+        raise ValueError('Nonfinite supervised/selected logits')
+    return DomainLoss(numerator, count, finite)
 
 
 def sparse_valid_counts(records, config, release):
@@ -279,7 +287,7 @@ def sparse_valid_counts(records, config, release):
     return counts
 
 
-def sparse_multitask_loss(logits, records, *, release, scope, config, epoch=0, occurrence_ids=None):
+def sparse_multitask_loss(logits, records, *, release, scope, config, epoch=0, occurrence_ids=None, defer_finite_check=False):
     """Formal sparse boundary. Other Artist remains an independent trusted CE."""
     if set(LOGICAL_DOMAINS) - set(logits):
         raise ValueError('Sparse multitask training requires all four logical outputs')
@@ -300,8 +308,11 @@ def sparse_multitask_loss(logits, records, *, release, scope, config, epoch=0, o
         domains[domain] = positive_unknown_loss(logits[domain], [row.get(domain + '_ids') or [] for row in records],
             negatives=[row.get(domain + '_negative_ids') or [] for row in records],
             forbidden=[row.get(domain + '_forbidden_ids') or [] for row in records],
-            allowed_ids=scope.ids_by_domain[domain], config=config.domains[domain], keys=keys, domain=domain)
+            allowed_ids=scope.ids_by_domain[domain], config=config.domains[domain], keys=keys, domain=domain, defer_finite_check=defer_finite_check)
     artist = collate_artist_targets(records, release)
     loss, count = masked_single_label_loss(logits['other_artist'], artist['targets'], artist['valid'])
-    domains['other_artist'] = DomainLoss(loss * count, count)
+    finite = torch.isfinite(logits['other_artist'][artist['valid'].to(logits['other_artist'].device)]).all()
+    if not defer_finite_check and not finite:
+        raise ValueError('Nonfinite supervised/selected artist logits')
+    domains['other_artist'] = DomainLoss(loss * count, count, finite)
     return SparseLossResult(domains, config.weights, scope.identity)
