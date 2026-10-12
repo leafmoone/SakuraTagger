@@ -22,7 +22,7 @@ class MultiTaskModel(nn.Module):
         self._source_membership = None
         self.set_other_artist_mode(other_artist_mode)
         self.general = GeneralModule(backbone.global_dim, backbone.patch_dim, layout)
-        self.identity = IdentityModule(backbone.global_dim, layout)
+        self.identity = IdentityModule(backbone.global_dim, layout, backbone.patch_dim)
         self.other_artist = OtherArtistModule(backbone.global_dim, layout.other_artist)
 
     def set_other_artist_mode(self, mode):
@@ -61,7 +61,7 @@ class MultiTaskModel(nn.Module):
         if 'general' in selected:
             logits['general'] = self.general(features.global_features, features.patch_tokens)
         if {'character', 'copyright'} & selected:
-            character, copyright = self.identity(features.global_features)
+            character, copyright = self.identity(features.global_features, features.patch_tokens)
             if 'character' in selected:
                 logits['character'] = character
             if 'copyright' in selected:

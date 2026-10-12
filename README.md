@@ -19,6 +19,11 @@ python -m pip install -e .
 python -m sakura_tagger.selfcheck
 ```
 
+The tested CPU dependency versions are pinned in `requirements-cpu.lock`:
+`python -m pip install -r requirements-cpu.lock`, then
+`python -m pip install --no-deps -e .`. This includes PyArrow and the scikit-learn
+metric reference. It is a CPU environment lock, not a CUDA installation recipe.
+
 Selfcheck uses a tiny, random **12-block upstream DINOv3** with small class counts.
 It performs synthetic CPU forwards/backwards and optimizer/checkpoint checks,
 never formal model training. It reports real weights as `NOT_VERIFIED` unless an
@@ -78,6 +83,32 @@ Candidate counts are 37,679 General, 50,369 Character + 17,664 Copyright, and
 21,506 Other Artist. Final sizes come from the versioned vocabulary. The
 candidate new heads have 91,355,378 trainable parameters; selfcheck reports each
 module and actual synthetic frozen/trainable counts separately.
+
+`configs/baseline.yaml` keeps this architecture with formal Other Artist
+`single_label` mode. `configs/v1_dev.yaml` retains the old multilabel mode.
+Loading weights must retain their declared mode; tensor shapes cannot infer it.
+
+`configs/identity_local.yaml` is the sole optional architecture candidate:
+four separate Identity patch queries, 256D/four-head attention, concatenation
+projected to 512D, LayerNorm (eps 1e-5), and a learned scalar residual initialized
+to 0.1. Queries start at Normal(0, 0.02); Linear layers use PyTorch's default
+initialization. A nonzero residual allows local-branch gradients immediately.
+It reuses the student's patch tokens, keeps one Identity classifier and does not
+provide person boxes or person–attribute binding. Quality improvement is
+unverified. The new heads total 92,275,955 parameters at candidate class counts.
+
+General and Identity widths are separately configurable with
+`general_feature_dim` and `identity_feature_dim`; an omitted width inherits the
+legacy `feature_dim` (default 512). Global mode creates no local parameters and
+preserves the exact old state keys, forward path, and canonical checkpoint
+metadata. Local mode requires `sakura-tagger-heads-v2-identity-local`, so switching
+architectures cannot silently resume a global checkpoint.
+
+Both modules expose `features(...)` and `classify_features(features, start, end)`
+for checkpoint-bound feature caching and contiguous class-block evaluation.
+Identity physical rows contain Character first, then Copyright; public forward
+still returns the separate logical domains. Run the focused compatibility and
+gradient check with `python -m sakura_tagger.selfcheck --suite architecture`.
 
 ```python
 from sakura_tagger.data import Vocabulary

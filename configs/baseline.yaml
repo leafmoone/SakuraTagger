@@ -1,0 +1,30 @@
+# Formal single-artist architecture baseline; no automatic training.
+# Candidate sizes only. The versioned dataset vocabulary is authoritative.
+head_layout:
+  version: sakura-tagger-heads-v1
+  general: 37679
+  character: 50369
+  copyright: 17664
+  other_artist: 21506
+  feature_dim: 512
+  identity_feature_mode: global
+  attention_dim: 256
+  attention_heads: 4
+  query_count: 16
+stage: frozen_heads
+loss:
+  gamma_pos: 0
+  gamma_neg: 4
+  clip: 0.05
+  chunk_size: 4096
+  other_artist_mode: single_label
+  weights: {general: 1.0, character: 1.0, copyright: 1.0, other_artist: 1.0}
+rfs: {threshold: 0.001, max_repeat_factor: 3.0}
+preservation: {global_features: 0.0, style_embedding: 0.0, artist_logits: 0.0}
+identity_metric_weight: 0.0
+trainer:
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  accumulation_steps: 1
+  amp: 'off'
+  gradient_clip: 1.0

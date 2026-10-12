@@ -153,7 +153,7 @@ class Trainer:
             if self.config.identity_metric_weight:
                 if 'identity_relations' not in batch:
                     raise ValueError('Enabled identity metric requires caller-provided identity_relations')
-                features = self.model.identity.metric_features(output.features.global_features)
+                features = self.model.identity.metric_features(output.features.global_features, output.features.patch_tokens)
                 metric = self.identity_metric(features, batch['identity_relations'])
                 if metric.ndim != 0:
                     raise ValueError('Identity metric must return a scalar tensor')

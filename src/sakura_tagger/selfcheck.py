@@ -526,11 +526,13 @@ def check_source_membership():
     return {**checks, 'real_source_mapping': 'NOT_VERIFIED'}
 
 
-def production_head_counts():
+def production_head_counts(identity_feature_mode='global'):
     from .model.modules import GeneralModule, IdentityModule, OtherArtistModule
-    layout = HeadLayout(37679, 50369, 17664, 21506)
+    options = {} if identity_feature_mode == 'global' else {
+        'identity_feature_mode': identity_feature_mode, 'version': 'sakura-tagger-heads-v2-identity-local'}
+    layout = HeadLayout(37679, 50369, 17664, 21506, **options)
     with torch.device('meta'):
-        modules = {'general': GeneralModule(1536, 768, layout), 'identity': IdentityModule(1536, layout),
+        modules = {'general': GeneralModule(1536, 768, layout), 'identity': IdentityModule(1536, layout, 768),
                    'other_artist': OtherArtistModule(1536, layout.other_artist)}
     counts = {name: sum(parameter.numel() for parameter in module.parameters()) for name, module in modules.items()}
     return {**counts, 'total': sum(counts.values()), 'basis': 'candidate architecture only; final vocabulary authoritative'}
@@ -552,12 +554,20 @@ def check_real_weights(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--suite', choices=('all', 'architecture', 'source'), default='all')
     parser.add_argument('--real-model-dir', default=None, help='Optional existing official Kaloscope package directory; never downloads')
     args = parser.parse_args()
     torch.set_num_threads(1)
+    from .selfcheck_architecture import check_architecture
+    if args.suite != 'all':
+        suite = check_architecture if args.suite == 'architecture' else check_source_membership
+        print(json.dumps(suite(), indent=2))
+        return
     print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'losses': check_losses(),
                       'training': check_training(), 'source_membership': check_source_membership(),
+                      'architecture': check_architecture(),
                       'candidate_production_heads': production_head_counts(),
+                      'identity_local_production_heads': production_head_counts('global_local'),
                       'real_weights': check_real_weights(args.real_model_dir) if args.real_model_dir else 'NOT_VERIFIED',
                       'CUDA': 'NOT_RUN', 'formal_training': 'NOT_RUN'}, indent=2))
 
