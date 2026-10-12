@@ -292,6 +292,17 @@ def check_training():
         restored = Trainer(make_model(9), metadata, config=config, loss_config=losses)
         resumed_sampler = BucketBatchSampler([(32, 48)] * 8, 2, shuffle=True, seed=41)
         restored.load_checkpoint(path, sampler=resumed_sampler)
+        # A genuine checkpoint containing the old sampler signature must pass
+        # Trainer prevalidation too, not just the sampler's standalone loader.
+        old_payload = torch.load(path, weights_only=True)
+        old_state = old_payload['sampler']
+        old_state['version'] = 1
+        for field in ('asset_sha256', 'sample_count', 'max_repeat_factor'):
+            old_state['signature'].pop(field)
+        old_state['signature'].update(sizes=((32, 48),) * 8, weights=(1.0,) * 8)
+        legacy_path = Path(directory) / 'legacy_sampler.pt'
+        torch.save(old_payload, legacy_path)
+        restored.load_checkpoint(legacy_path, sampler=resumed_sampler)
         torch.testing.assert_close(torch.rand(3), expected_rng, rtol=0, atol=0)
         assert random.random() == expected_python and __import__('numpy').random.rand() == expected_numpy
         assert list(resumed_sampler) == list(sampler)
@@ -351,7 +362,8 @@ def check_training():
     amp_result = amp_trainer.train_batch(batch)
     assert __import__('math').isfinite(amp_result['loss'])
     return {'checkpoint_exact_next_update': 'PASS', 'checkpoint_RNG_and_sampler': 'PASS',
-            'checkpoint_rejects_partial_or_mismatch': 'PASS', 'manifest_image_and_collation': 'PASS',
+            'checkpoint_rejects_partial_or_mismatch': 'PASS', 'legacy_sampler_checkpoint_v1': 'PASS',
+            'manifest_image_and_collation': 'PASS',
             'evaluation_domain_counts': {name: value['valid_count'] for name, value in evaluation.items()},
             'stage_optimizer_refresh': 'PASS', 'teacher_frozen_student_KD_gradient': 'PASS',
             'KD_losses': kd_result['auxiliary'], 'CPU_BF16_AMP': 'PASS'}
@@ -554,7 +566,7 @@ def check_real_weights(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=('all', 'architecture', 'source', 'release', 'positive_unknown', 'tar'), default='all')
+    parser.add_argument('--suite', choices=('all', 'architecture', 'source', 'release', 'positive_unknown', 'tar', 'sampling'), default='all')
     parser.add_argument('--real-model-dir', default=None, help='Optional existing official Kaloscope package directory; never downloads')
     args = parser.parse_args()
     torch.set_num_threads(1)
@@ -562,6 +574,10 @@ def main():
     from .selfcheck_release import check_release
     from .selfcheck_positive_unknown import check_positive_unknown
     if args.suite != 'all':
+        if args.suite == 'sampling':
+            from .selfcheck_sampling import check_sampling
+            print(json.dumps(check_sampling(), indent=2))
+            return
         if args.suite == 'tar':
             from .selfcheck_tar import check_tar
             print(json.dumps(check_tar(), indent=2))
@@ -571,12 +587,14 @@ def main():
         print(json.dumps(suite(), indent=2))
         return
     from .selfcheck_tar import check_tar
+    from .selfcheck_sampling import check_sampling
     print(json.dumps({'synthetic_cpu': check_model(), 'data': check_data(), 'losses': check_losses(),
                       'training': check_training(), 'source_membership': check_source_membership(),
                       'architecture': check_architecture(),
                       'release': check_release(),
                       'positive_unknown': check_positive_unknown(),
                       'tar': check_tar(),
+                      'sampling': check_sampling(),
                       'candidate_production_heads': production_head_counts(),
                       'identity_local_production_heads': production_head_counts('global_local'),
                       'real_weights': check_real_weights(args.real_model_dir) if args.real_model_dir else 'NOT_VERIFIED',

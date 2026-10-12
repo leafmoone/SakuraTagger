@@ -29,3 +29,8 @@ from .tar_dataset import (TarReader, TarDataset, DimensionCorrections, collate_p
 __all__ += ['ShardCache', 'LocalShardProvider', 'LoopbackShardProvider', 'HuggingFaceShardProvider',
             'provider_for_release', 'CacheBackpressure', 'TarReader', 'TarDataset',
             'DimensionCorrections', 'collate_prepared', 'rebucket_prepared', 'decoder_capabilities']
+
+from .window_sampling import (SamplingAssets, build_sampling_assets, ShardWindowSampler,
+                              PlannedBatch, window_loader)
+
+__all__ += ['SamplingAssets', 'build_sampling_assets', 'ShardWindowSampler', 'PlannedBatch', 'window_loader']

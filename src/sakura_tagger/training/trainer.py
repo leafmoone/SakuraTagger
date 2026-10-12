@@ -268,8 +268,11 @@ class Trainer:
             raise ValueError('Checkpoint sampler presence mismatch')
         if (payload['teacher'] is None) != (self.teacher is None):
             raise ValueError('Checkpoint teacher presence mismatch')
-        if sampler is not None and payload['sampler'].get('signature') != sampler._signature():
-            raise ValueError('Checkpoint sampler configuration mismatch')
+        if sampler is not None:
+            if hasattr(sampler, 'validate_state_dict'):
+                sampler.validate_state_dict(payload['sampler'])
+            elif payload['sampler'].get('signature') != sampler._signature():
+                raise ValueError('Checkpoint sampler configuration mismatch')
         # Validate tensor names/shapes before mutating either student or teacher.
         for module, state in ((self.model, payload['model']), (self.teacher, payload['teacher'])):
             if module is not None:

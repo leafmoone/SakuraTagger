@@ -196,11 +196,7 @@ class TarDataset(Dataset):
     def __len__(self):
         return len(self.index)
 
-    def __getitem__(self, ordinal):
-        occurrence = 0
-        if isinstance(ordinal, tuple):
-            ordinal, occurrence = ordinal
-        row = self.index[ordinal]
+    def _read_image(self, row):
         shard = row['shard_id']
         verify_json = self._checked[shard] < self.json_checks_per_shard
         with self.cache.lease(shard) as path:
@@ -210,23 +206,54 @@ class TarDataset(Dataset):
         if verify_json:
             validate_sample_json(metadata, row, self.index.release)
             self._checked[shard] += 1
+        return content
+
+    def _remember_dimensions(self, row, raw_size, effective, image_format, alpha):
+        correction = {'raw_width': raw_size[0], 'raw_height': raw_size[1],
+                      'effective_width': effective[0], 'effective_height': effective[1],
+                      'raw_conflict': row.get('raw_width') is not None and raw_size != (row['raw_width'], row['raw_height']),
+                      'effective_conflict': row.get('effective_width') is not None and effective != (row['effective_width'], row['effective_height']),
+                      'format': image_format, 'alpha_composited_on_original_canvas': alpha}
+        existing = self.corrections.get(row['sample_id'])
+        if existing is None:
+            self.corrections.put(row['sample_id'], correction)
+        elif existing != correction:
+            raise ValueError('Decoded dimensions changed within an immutable Release')
+        return correction
+
+    def inspect_dimensions(self, ordinal):
+        """Actual first decode before scheduling; only one image lives at a time.
+
+        Never trust the raw/P2 aspect to freeze a batch plan. Warm visits reuse the
+        Release-bound derived record; cold planning costs one extra decode without
+        resizing. Worker prefetch cannot subsequently change the planned geometry.
+        """
+        row = self.index[ordinal]
+        existing = self.corrections.get(row['sample_id'])
+        if existing is not None:
+            return existing['effective_width'], existing['effective_height']
+        with Image.open(BytesIO(self._read_image(row))) as image:
+            image.load()
+            raw_size = image.size
+            # ImageOps.exif_transpose swaps axes for these four orientations.
+            effective = raw_size[::-1] if image.getexif().get(274) in (5, 6, 7, 8) else raw_size
+            self._remember_dimensions(row, raw_size, effective, image.format,
+                                      image.mode in ('RGBA', 'LA') or 'transparency' in image.info)
+        return effective
+
+    def __getitem__(self, ordinal):
+        occurrence = 0
+        if isinstance(ordinal, tuple):
+            ordinal, occurrence = ordinal
+        row = self.index[ordinal]
+        content = self._read_image(row)
         with Image.open(BytesIO(content)) as image:
             image.load()
             raw_size, image_format = image.size, image.format
             alpha = image.mode in ('RGBA', 'LA') or 'transparency' in image.info
             prepared = self.preprocessor(image)
         effective = prepared.bucket.original_size
-        correction = {'raw_width': raw_size[0], 'raw_height': raw_size[1],
-                      'effective_width': effective[0], 'effective_height': effective[1],
-                      'raw_conflict': row.get('raw_width') is not None and raw_size != (row['raw_width'], row['raw_height']),
-                      'effective_conflict': row.get('effective_width') is not None and effective != (row['effective_width'], row['effective_height']),
-                      'format': image_format, 'alpha_composited_on_original_canvas': alpha}
-        # Repeated epochs read the derived record; only first decode writes it.
-        existing = self.corrections.get(row['sample_id'])
-        if existing is None:
-            self.corrections.put(row['sample_id'], correction)
-        elif existing != correction:
-            raise ValueError('Decoded dimensions changed within an immutable Release')
+        correction = self._remember_dimensions(row, raw_size, effective, image_format, alpha)
         return {'images': prepared.tensor, 'record': row, 'image_id': row['sample_id'],
                 'ordinal': int(ordinal), 'occurrence_id': int(occurrence), 'effective_size': effective,
                 'dimension_correction': correction}

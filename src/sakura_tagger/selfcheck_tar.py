@@ -47,13 +47,13 @@ def tiny_tar_release(root, *, count=4):
             image.save(stream, format='JPEG', exif=exif)
             row.update(image_member=f'{index}.jpg', effective_width=48, effective_height=32)  # Deliberately stale P2 assumption.
         elif index % 4 == 1:
-            Image.new('RGBA', (96, 64), (255, 10, 20, 100)).save(stream, format='PNG')
+            Image.new('RGBA', (96, 64), (255, 10 + index, 20, 100)).save(stream, format='PNG')
             row.update(raw_width=48, raw_height=32, effective_width=48, effective_height=32)
         elif index % 4 == 2:
-            Image.new('RGB', (32, 48), (15, 40, 90)).save(stream, format='WEBP')
+            Image.new('RGB', (32, 48), (15 + index, 40, 90)).save(stream, format='WEBP')
             row.update(image_member=f'{index}.webp', raw_width=32, raw_height=48, effective_width=32, effective_height=48)
         else:
-            Image.new('RGB', (32, 32), (55, 60, 90)).save(stream, format='PNG')
+            Image.new('RGB', (32, 32), (55, 60 + index, 90)).save(stream, format='PNG')
             row.update(raw_width=32, raw_height=32, effective_width=32, effective_height=32)
         content = stream.getvalue()
         row['image_sha256'] = hashlib.sha256(content).hexdigest()

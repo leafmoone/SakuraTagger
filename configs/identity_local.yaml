@@ -63,3 +63,12 @@ cache:
   read_timeout: 30.0
   retries: 1
   max_member_bytes: 134217728
+
+sampling:
+  assets: cache/sampling
+  batch_size: 8
+  window_samples: 4096
+  seed: 0
+  num_workers: 0
+  worker_transport: shared_memory  # numpy uses ordinary pipes if tensor-FD IPC is unavailable
+  worker_timeout: 60.0
